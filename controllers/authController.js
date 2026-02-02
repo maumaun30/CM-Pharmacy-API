@@ -38,7 +38,7 @@ exports.register = async (req, res) => {
     const token = jwt.sign(
       { id: newUser.id, username: newUser.username, role: newUser.role },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN }
+      { expiresIn: process.env.JWT_EXPIRES_IN },
     );
 
     return res.status(201).json({
@@ -91,7 +91,7 @@ exports.login = async (req, res) => {
     const token = jwt.sign(
       { id: user.id, username: user.username, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN }
+      { expiresIn: process.env.JWT_EXPIRES_IN },
     );
 
     return res.status(200).json({
@@ -133,12 +133,20 @@ exports.getProfile = async (req, res) => {
 // Update user profile
 exports.updateProfile = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { username, email, password } = req.body;
     const userId = req.user.id;
 
     const user = await User.findByPk(userId);
     if (!user) {
       return res.status(404).json({ message: "User not found" });
+    }
+
+    // Check if username already exists (if changing)
+    if (username && username !== user.username) {
+      const existingUsername = await User.findOne({ where: { username } });
+      if (existingUsername) {
+        return res.status(400).json({ message: "Username already taken" });
+      }
     }
 
     // Check if email already exists
@@ -150,6 +158,7 @@ exports.updateProfile = async (req, res) => {
     }
 
     // Update fields
+    if (username) user.username = username;
     if (email) user.email = email;
     if (password) user.password = password;
 
@@ -162,64 +171,6 @@ exports.updateProfile = async (req, res) => {
         username: user.username,
         email: user.email,
         role: user.role,
-      },
-    });
-  } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Server error", error: error.message });
-  }
-};
-
-// Admin only: Get all users
-exports.getAllUsers = async (req, res) => {
-  try {
-    const users = await User.findAll({
-      attributes: { exclude: ["password"] },
-    });
-
-    return res.status(200).json(users);
-  } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Server error", error: error.message });
-  }
-};
-
-// Admin only: Update user (including role)
-exports.updateUser = async (req, res) => {
-  try {
-    const { email, role, isActive } = req.body;
-    const userId = req.params.id;
-
-    const user = await User.findByPk(userId);
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
-
-    // Check if email already exists
-    if (email && email !== user.email) {
-      const existingEmail = await User.findOne({ where: { email } });
-      if (existingEmail) {
-        return res.status(400).json({ message: "Email already in use" });
-      }
-    }
-
-    // Update fields
-    if (email) user.email = email;
-    if (role) user.role = role;
-    if (isActive !== undefined) user.isActive = isActive;
-
-    await user.save();
-
-    return res.status(200).json({
-      message: "User updated successfully",
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        isActive: user.isActive,
       },
     });
   } catch (error) {

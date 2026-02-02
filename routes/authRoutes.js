@@ -14,18 +14,4 @@ router.post("/login", authController.login);
 router.get("/profile", authenticateUser, authController.getProfile);
 router.put("/profile", authenticateUser, authController.updateProfile);
 
-// Admin only routes
-router.get(
-  "/users",
-  authenticateUser,
-  authorizeRoles("admin"),
-  authController.getAllUsers
-);
-router.put(
-  "/users/:id",
-  authenticateUser,
-  authorizeRoles("admin"),
-  authController.updateUser
-);
-
 module.exports = router;

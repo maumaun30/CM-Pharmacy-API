@@ -6,6 +6,7 @@ const productRoutes = require("./routes/productRoutes");
 const authRoutes = require("./routes/authRoutes");
 const saleRoutes = require("./routes/saleRoutes");
 const stockRoutes = require("./routes/stockRoutes");
+const userRoutes = require("./routes/userRoutes");
 
 const {
   authenticateUser,
@@ -31,6 +32,8 @@ app.use("/api/products", authenticateUser, productRoutes);
 
 app.use("/api/stocks", authenticateUser, stockRoutes);
 app.use("/api/sales", authenticateUser, saleRoutes);
+
+app.use("/api/users", authenticateUser, userRoutes);
 
 // Basic route
 app.get("/", (req, res) => {
