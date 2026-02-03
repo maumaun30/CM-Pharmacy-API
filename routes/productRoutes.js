@@ -38,4 +38,12 @@ router.put(
   productController.updateStock,
 );
 
+// NEW: Toggle product status
+router.patch(
+  "/:id/toggle-status",
+  authenticateUser,
+  authorizeRoles("admin"),
+  productController.toggleProductStatus,
+);
+
 module.exports = router;

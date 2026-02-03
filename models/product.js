@@ -9,10 +9,23 @@ module.exports = (sequelize, DataTypes) => {
         as: "category",
       });
 
-      Product.hasMany(models.StockMovement, {
+      Product.belongsToMany(models.Discount, {
+        through: "ProductDiscounts",
         foreignKey: "productId",
-        as: "stockMovements",
+        otherKey: "discountId",
+        as: "discounts",
       });
+    }
+
+    // Helper method to calculate margin percentage
+    getMarginPercentage() {
+      if (this.cost === 0) return 0;
+      return ((this.price - this.cost) / this.cost) * 100;
+    }
+
+    // Helper method to get margin amount
+    getMarginAmount() {
+      return this.price - this.cost;
     }
   }
 
@@ -69,12 +82,36 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: false,
       },
+      status: {
+        type: DataTypes.ENUM("ACTIVE", "INACTIVE"),
+        allowNull: false,
+        defaultValue: "ACTIVE",
+      },
       categoryId: {
         type: DataTypes.INTEGER,
         allowNull: false,
         references: {
           model: "categories",
           key: "id",
+        },
+      },
+      // Virtual field for margin percentage
+      marginPercentage: {
+        type: DataTypes.VIRTUAL,
+        get() {
+          const cost = parseFloat(this.getDataValue("cost")) || 0;
+          const price = parseFloat(this.getDataValue("price")) || 0;
+          if (cost === 0) return 0;
+          return ((price - cost) / cost) * 100;
+        },
+      },
+      // Virtual field for margin amount
+      marginAmount: {
+        type: DataTypes.VIRTUAL,
+        get() {
+          const cost = parseFloat(this.getDataValue("cost")) || 0;
+          const price = parseFloat(this.getDataValue("price")) || 0;
+          return price - cost;
         },
       },
     },

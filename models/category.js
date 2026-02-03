@@ -8,6 +8,13 @@ module.exports = (sequelize, DataTypes) => {
         foreignKey: "categoryId",
         as: "products",
       });
+
+      Category.belongsToMany(models.Discount, {
+        through: "CategoryDiscounts",
+        foreignKey: "categoryId",
+        otherKey: "discountId",
+        as: "discounts",
+      });
     }
   }
 
@@ -28,7 +35,7 @@ module.exports = (sequelize, DataTypes) => {
       modelName: "Category",
       tableName: "categories",
       timestamps: true,
-    }
+    },
   );
 
   return Category;

@@ -11,6 +11,7 @@ exports.getAllProducts = async (req, res) => {
       requiresPrescription,
       search,
       inStock,
+      status, // NEW: filter by status
     } = req.query;
 
     const whereClause = {};
@@ -35,6 +36,11 @@ exports.getAllProducts = async (req, res) => {
 
     if (inStock === "true") {
       whereClause.quantity = { [Op.gt]: 0 };
+    }
+
+    // NEW: Filter by status
+    if (status) {
+      whereClause.status = status;
     }
 
     if (search) {
@@ -107,6 +113,7 @@ exports.createProduct = async (req, res) => {
       dosage,
       form,
       requiresPrescription,
+      status, // NEW
       categoryId,
     } = req.body;
 
@@ -145,6 +152,7 @@ exports.createProduct = async (req, res) => {
       dosage,
       form,
       requiresPrescription: requiresPrescription || false,
+      status: status || "ACTIVE", // NEW
       categoryId,
     });
 
@@ -182,6 +190,7 @@ exports.updateProduct = async (req, res) => {
       dosage,
       form,
       requiresPrescription,
+      status, // NEW
       categoryId,
     } = req.body;
 
@@ -229,6 +238,7 @@ exports.updateProduct = async (req, res) => {
         requiresPrescription !== undefined
           ? requiresPrescription
           : product.requiresPrescription,
+      status: status || product.status, // NEW
       categoryId: categoryId || product.categoryId,
     });
 
@@ -290,5 +300,27 @@ exports.updateStock = async (req, res) => {
     res
       .status(500)
       .json({ message: "Error updating stock", error: error.message });
+  }
+};
+
+// NEW: Toggle product status
+exports.toggleProductStatus = async (req, res) => {
+  try {
+    const product = await Product.findByPk(req.params.id);
+    if (!product) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    product.status = product.status === "ACTIVE" ? "INACTIVE" : "ACTIVE";
+    await product.save();
+
+    res.json({
+      message: `Product ${product.status === "ACTIVE" ? "activated" : "deactivated"}`,
+      status: product.status,
+    });
+  } catch (error) {
+    res
+      .status(500)
+      .json({ message: "Error toggling product status", error: error.message });
   }
 };

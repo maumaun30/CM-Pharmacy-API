@@ -3,6 +3,7 @@ const cors = require("cors");
 const dotenv = require("dotenv");
 const categoryRoutes = require("./routes/categoryRoutes");
 const productRoutes = require("./routes/productRoutes");
+const discountRoutes = require("./routes/discountRoutes");
 const authRoutes = require("./routes/authRoutes");
 const saleRoutes = require("./routes/saleRoutes");
 const stockRoutes = require("./routes/stockRoutes");
@@ -29,6 +30,7 @@ app.use("/api/auth", authRoutes);
 // Protected routes
 app.use("/api/categories", authenticateUser, categoryRoutes);
 app.use("/api/products", authenticateUser, productRoutes);
+app.use("/api/discounts", authenticateUser, discountRoutes);
 
 app.use("/api/stocks", authenticateUser, stockRoutes);
 app.use("/api/sales", authenticateUser, saleRoutes);
