@@ -1,8 +1,8 @@
-const { Sale, SaleItem, Product, User } = require("../models");
+const { Sale, SaleItem, Product, User, Discount, Category } = require("../models");
 
 exports.createSale = async (req, res) => {
   try {
-    const { cart } = req.body; // [{ product: { id }, quantity }, ...]
+    const { cart, subtotal, totalDiscount, total, cashAmount } = req.body;
 
     // Validate user
     if (!req.user || !req.user.id) {
@@ -15,13 +15,20 @@ exports.createSale = async (req, res) => {
 
     // Validate cart items structure
     for (const item of cart) {
-      if (!item.product?.id || !item.quantity || item.quantity <= 0) {
-        return res.status(400).json({ message: "Invalid cart item format" });
+      // Check for both old format (item.product.id) and new format (item.productId)
+      const productId = item.productId || item.product?.id;
+      const quantity = item.quantity;
+
+      if (!productId || !quantity || quantity <= 0) {
+        return res.status(400).json({ 
+          message: "Invalid cart item format",
+          receivedItem: item 
+        });
       }
     }
 
-    // Fetch all products at once for validation
-    const productIds = cart.map((item) => item.product.id);
+    // Extract product IDs (handle both formats)
+    const productIds = cart.map((item) => item.productId || item.product.id);
     const products = await Product.findAll({
       where: { id: productIds },
     });
@@ -29,15 +36,17 @@ exports.createSale = async (req, res) => {
     // Create a map for quick lookup
     const productMap = new Map(products.map((p) => [p.id, p]));
 
-    // Validate stock and calculate total
-    let totalAmount = 0;
+    // Validate stock and calculate totals
+    let calculatedSubtotal = 0;
+    let calculatedTotalDiscount = 0;
 
     for (const item of cart) {
-      const product = productMap.get(item.product.id);
+      const productId = item.productId || item.product.id;
+      const product = productMap.get(productId);
 
       if (!product) {
         return res.status(404).json({
-          message: `Product ID ${item.product.id} not found`,
+          message: `Product ID ${productId} not found`,
         });
       }
 
@@ -47,8 +56,34 @@ exports.createSale = async (req, res) => {
         });
       }
 
-      // Use database price, not client price
-      totalAmount += Number(product.price) * item.quantity;
+      // Calculate subtotal using database price
+      const itemSubtotal = Number(product.price) * item.quantity;
+      calculatedSubtotal += itemSubtotal;
+
+      // Calculate discount if applied
+      if (item.discountId && item.discountedPrice) {
+        const itemDiscount = (Number(product.price) - Number(item.discountedPrice)) * item.quantity;
+        calculatedTotalDiscount += itemDiscount;
+      }
+    }
+
+    const calculatedTotal = calculatedSubtotal - calculatedTotalDiscount;
+
+    // Validate totals (allow small floating point differences)
+    if (subtotal && Math.abs(calculatedSubtotal - subtotal) > 0.01) {
+      return res.status(400).json({
+        message: "Subtotal mismatch",
+        calculated: calculatedSubtotal,
+        received: subtotal,
+      });
+    }
+
+    if (totalDiscount && Math.abs(calculatedTotalDiscount - totalDiscount) > 0.01) {
+      return res.status(400).json({
+        message: "Total discount mismatch",
+        calculated: calculatedTotalDiscount,
+        received: totalDiscount,
+      });
     }
 
     // Wrap everything in a transaction
@@ -56,7 +91,11 @@ exports.createSale = async (req, res) => {
       // Create sale record
       const sale = await Sale.create(
         {
-          totalAmount,
+          totalAmount: calculatedTotal,
+          subtotal: calculatedSubtotal,
+          totalDiscount: calculatedTotalDiscount,
+          cashAmount: cashAmount || null,
+          changeAmount: cashAmount ? cashAmount - calculatedTotal : null,
           soldBy: req.user.id,
         },
         { transaction: t }
@@ -64,28 +103,36 @@ exports.createSale = async (req, res) => {
 
       // Create sale items and update stock
       for (const item of cart) {
-        const product = productMap.get(item.product.id);
+        const productId = item.productId || item.product.id;
+        const product = productMap.get(productId);
 
-        // Create sale item with database price
+        // Determine final price (discounted or regular)
+        const finalPrice = item.discountedPrice 
+          ? Number(item.discountedPrice) 
+          : Number(product.price);
+
+        // Create sale item
         await SaleItem.create(
           {
             saleId: sale.id,
             productId: product.id,
             quantity: item.quantity,
-            price: product.price, // Use DB price
+            price: Number(product.price), // Original price
+            discountedPrice: item.discountedPrice ? Number(item.discountedPrice) : null,
+            discountId: item.discountId || null,
+            discountAmount: item.discountedPrice 
+              ? (Number(product.price) - Number(item.discountedPrice)) * item.quantity
+              : 0,
           },
           { transaction: t }
         );
 
         // Update stock
-        await Product.decrement(
-          "quantity",
-          {
-            by: item.quantity,
-            where: { id: product.id },
-            transaction: t,
-          }
-        );
+        await Product.decrement("quantity", {
+          by: item.quantity,
+          where: { id: product.id },
+          transaction: t,
+        });
       }
 
       return sale;
@@ -94,7 +141,11 @@ exports.createSale = async (req, res) => {
     return res.status(201).json({
       message: "Sale recorded successfully",
       saleId: result.id,
+      subtotal: result.subtotal,
+      totalDiscount: result.totalDiscount,
       totalAmount: result.totalAmount,
+      cashAmount: result.cashAmount,
+      changeAmount: result.changeAmount,
     });
   } catch (error) {
     console.error("Sale error:", error);
@@ -116,25 +167,63 @@ exports.getSales = async (req, res) => {
           include: [
             {
               model: Product,
+              as: "Product",
               attributes: ["id", "name"],
             },
+            {
+              model: Discount,
+              as: "Discount",
+              attributes: ["id", "name", "discountType", "discountValue"],
+              required: false,
+            },
           ],
+        },
+        {
+          model: User,
+          as: "seller",
+          attributes: ["id", "username", "email"], // CHANGED: name -> username
+          required: false,
         },
       ],
     });
 
     const response = sales.map((sale) => ({
       id: sale.id,
-      totalAmount: sale.totalAmount,
+      subtotal: sale.subtotal ? parseFloat(sale.subtotal) : null,
+      totalDiscount: sale.totalDiscount ? parseFloat(sale.totalDiscount) : 0,
+      totalAmount: parseFloat(sale.totalAmount),
+      cashAmount: sale.cashAmount ? parseFloat(sale.cashAmount) : null,
+      changeAmount: sale.changeAmount ? parseFloat(sale.changeAmount) : null,
       soldAt: sale.soldAt,
       soldBy: sale.soldBy,
+      seller: sale.seller
+        ? {
+            id: sale.seller.id,
+            name: sale.seller.username, // CHANGED: Map username to name for frontend
+            email: sale.seller.email,
+          }
+        : null,
       items: sale.items.map((item) => ({
         product: {
           id: item.Product.id,
           name: item.Product.name,
         },
         quantity: item.quantity,
-        price: Number(item.price),
+        price: parseFloat(item.price),
+        discountedPrice: item.discountedPrice
+          ? parseFloat(item.discountedPrice)
+          : null,
+        discountAmount: item.discountAmount
+          ? parseFloat(item.discountAmount)
+          : 0,
+        discount: item.Discount
+          ? {
+              id: item.Discount.id,
+              name: item.Discount.name,
+              type: item.Discount.discountType,
+              value: parseFloat(item.Discount.discountValue),
+            }
+          : null,
       })),
     }));
 

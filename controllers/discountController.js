@@ -1,4 +1,4 @@
-const { Discount, Product } = require("../models");
+const { Discount, Product, Category } = require("../models"); // ADD Category import
 const { Op } = require("sequelize");
 
 // Get all discounts with optional filters
@@ -41,25 +41,19 @@ exports.getAllDiscounts = async (req, res) => {
           [Op.and]: [
             { endDate: null },
             {
-              [Op.or]: [
-                { startDate: null },
-                { startDate: { [Op.lte]: now } }
-              ]
-            }
-          ]
+              [Op.or]: [{ startDate: null }, { startDate: { [Op.lte]: now } }],
+            },
+          ],
         },
         // Time-bound discounts within range
         {
           [Op.and]: [
             {
-              [Op.or]: [
-                { startDate: null },
-                { startDate: { [Op.lte]: now } }
-              ]
+              [Op.or]: [{ startDate: null }, { startDate: { [Op.lte]: now } }],
             },
-            { endDate: { [Op.gte]: now } }
-          ]
-        }
+            { endDate: { [Op.gte]: now } },
+          ],
+        },
       ];
     }
 
@@ -77,12 +71,18 @@ exports.getAllDiscounts = async (req, res) => {
           model: Product,
           as: "products",
           attributes: ["id", "name", "sku"],
-          through: { attributes: [] }, // Exclude junction table data
+          through: { attributes: [] },
+        },
+        {
+          model: Category,
+          as: "categories",
+          attributes: ["id", "name"],
+          through: { attributes: [] },
         },
       ],
       order: [
         ["priority", "DESC"],
-        ["createdAt", "DESC"]
+        ["createdAt", "DESC"],
       ],
     });
 
@@ -103,6 +103,12 @@ exports.getDiscountById = async (req, res) => {
           model: Product,
           as: "products",
           attributes: ["id", "name", "sku", "price"],
+          through: { attributes: [] },
+        },
+        {
+          model: Category,
+          as: "categories",
+          attributes: ["id", "name"],
           through: { attributes: [] },
         },
       ],
@@ -139,6 +145,7 @@ exports.createDiscount = async (req, res) => {
       priority,
       stackable,
       productIds, // Array of product IDs if applicableTo is 'SPECIFIC_PRODUCTS'
+      categoryIds, // ADD THIS - Array of category IDs if applicableTo is 'CATEGORIES'
     } = req.body;
 
     // Validate required fields
@@ -195,15 +202,38 @@ exports.createDiscount = async (req, res) => {
       stackable: stackable || false,
     });
 
+    // Associate categories if applicable
+    if (
+      applicableTo === "CATEGORIES" &&
+      categoryIds &&
+      categoryIds.length > 0
+    ) {
+      const categories = await Category.findAll({
+        where: { id: categoryIds },
+      });
+
+      if (categories.length !== categoryIds.length) {
+        return res.status(400).json({
+          message: "One or more category IDs are invalid",
+        });
+      }
+
+      await newDiscount.setCategories(categories);
+    }
+
     // If specific products are specified, associate them
-    if (applicableTo === "SPECIFIC_PRODUCTS" && productIds && productIds.length > 0) {
+    if (
+      applicableTo === "SPECIFIC_PRODUCTS" &&
+      productIds &&
+      productIds.length > 0
+    ) {
       const products = await Product.findAll({
-        where: { id: productIds }
+        where: { id: productIds },
       });
 
       if (products.length !== productIds.length) {
         return res.status(400).json({
-          message: "One or more product IDs are invalid"
+          message: "One or more product IDs are invalid",
         });
       }
 
@@ -211,7 +241,7 @@ exports.createDiscount = async (req, res) => {
     }
 
     // Fetch the created discount with associations
-    const discountWithProducts = await Discount.findByPk(newDiscount.id, {
+    const discountWithAssociations = await Discount.findByPk(newDiscount.id, {
       include: [
         {
           model: Product,
@@ -219,10 +249,16 @@ exports.createDiscount = async (req, res) => {
           attributes: ["id", "name", "sku"],
           through: { attributes: [] },
         },
+        {
+          model: Category,
+          as: "categories",
+          attributes: ["id", "name"],
+          through: { attributes: [] },
+        },
       ],
     });
 
-    return res.status(201).json(discountWithProducts);
+    return res.status(201).json(discountWithAssociations);
   } catch (error) {
     return res
       .status(500)
@@ -249,6 +285,7 @@ exports.updateDiscount = async (req, res) => {
       priority,
       stackable,
       productIds,
+      categoryIds, // ADD THIS
     } = req.body;
 
     const discountId = req.params.id;
@@ -271,7 +308,8 @@ exports.updateDiscount = async (req, res) => {
 
     // Validate discount value if provided
     const newDiscountType = discountType || discount.discountType;
-    const newDiscountValue = discountValue !== undefined ? discountValue : discount.discountValue;
+    const newDiscountValue =
+      discountValue !== undefined ? discountValue : discount.discountValue;
 
     if (discountValue !== undefined && discountValue < 0) {
       return res.status(400).json({
@@ -286,10 +324,15 @@ exports.updateDiscount = async (req, res) => {
     }
 
     // Validate date range
-    const newStartDate = startDate !== undefined ? startDate : discount.startDate;
+    const newStartDate =
+      startDate !== undefined ? startDate : discount.startDate;
     const newEndDate = endDate !== undefined ? endDate : discount.endDate;
 
-    if (newStartDate && newEndDate && new Date(newStartDate) > new Date(newEndDate)) {
+    if (
+      newStartDate &&
+      newEndDate &&
+      new Date(newStartDate) > new Date(newEndDate)
+    ) {
       return res.status(400).json({
         message: "Start date must be before end date",
       });
@@ -298,20 +341,50 @@ exports.updateDiscount = async (req, res) => {
     // Update the discount
     await discount.update({
       name: name || discount.name,
-      description: description !== undefined ? description : discount.description,
+      description:
+        description !== undefined ? description : discount.description,
       discountType: discountType || discount.discountType,
-      discountValue: discountValue !== undefined ? discountValue : discount.discountValue,
+      discountValue:
+        discountValue !== undefined ? discountValue : discount.discountValue,
       discountCategory: discountCategory || discount.discountCategory,
       startDate: startDate !== undefined ? startDate : discount.startDate,
       endDate: endDate !== undefined ? endDate : discount.endDate,
       isEnabled: isEnabled !== undefined ? isEnabled : discount.isEnabled,
-      requiresVerification: requiresVerification !== undefined ? requiresVerification : discount.requiresVerification,
+      requiresVerification:
+        requiresVerification !== undefined
+          ? requiresVerification
+          : discount.requiresVerification,
       applicableTo: applicableTo || discount.applicableTo,
-      minimumPurchaseAmount: minimumPurchaseAmount !== undefined ? minimumPurchaseAmount : discount.minimumPurchaseAmount,
-      maximumDiscountAmount: maximumDiscountAmount !== undefined ? maximumDiscountAmount : discount.maximumDiscountAmount,
+      minimumPurchaseAmount:
+        minimumPurchaseAmount !== undefined
+          ? minimumPurchaseAmount
+          : discount.minimumPurchaseAmount,
+      maximumDiscountAmount:
+        maximumDiscountAmount !== undefined
+          ? maximumDiscountAmount
+          : discount.maximumDiscountAmount,
       priority: priority !== undefined ? priority : discount.priority,
       stackable: stackable !== undefined ? stackable : discount.stackable,
     });
+
+    // Update category associations if provided
+    if (categoryIds !== undefined) {
+      if (categoryIds.length === 0) {
+        await discount.setCategories([]);
+      } else {
+        const categories = await Category.findAll({
+          where: { id: categoryIds },
+        });
+
+        if (categories.length !== categoryIds.length) {
+          return res.status(400).json({
+            message: "One or more category IDs are invalid",
+          });
+        }
+
+        await discount.setCategories(categories);
+      }
+    }
 
     // Update product associations if provided
     if (productIds !== undefined) {
@@ -319,12 +392,12 @@ exports.updateDiscount = async (req, res) => {
         await discount.setProducts([]);
       } else {
         const products = await Product.findAll({
-          where: { id: productIds }
+          where: { id: productIds },
         });
 
         if (products.length !== productIds.length) {
           return res.status(400).json({
-            message: "One or more product IDs are invalid"
+            message: "One or more product IDs are invalid",
           });
         }
 
@@ -338,6 +411,12 @@ exports.updateDiscount = async (req, res) => {
           model: Product,
           as: "products",
           attributes: ["id", "name", "sku"],
+          through: { attributes: [] },
+        },
+        {
+          model: Category,
+          as: "categories",
+          attributes: ["id", "name"],
           through: { attributes: [] },
         },
       ],
@@ -386,9 +465,10 @@ exports.toggleDiscountStatus = async (req, res) => {
       isEnabled: discount.isEnabled,
     });
   } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Error toggling discount status", error: error.message });
+    res.status(500).json({
+      message: "Error toggling discount status",
+      error: error.message,
+    });
   }
 };
 
@@ -397,7 +477,16 @@ exports.getApplicableDiscounts = async (req, res) => {
   try {
     const { productId } = req.params;
 
-    const product = await Product.findByPk(productId);
+    const product = await Product.findByPk(productId, {
+      include: [
+        {
+          model: Category,
+          as: "category",
+          attributes: ["id"],
+        },
+      ],
+    });
+
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
     }
@@ -416,10 +505,10 @@ exports.getApplicableDiscounts = async (req, res) => {
               {
                 [Op.or]: [
                   { startDate: null },
-                  { startDate: { [Op.lte]: now } }
-                ]
-              }
-            ]
+                  { startDate: { [Op.lte]: now } },
+                ],
+              },
+            ],
           },
           // Time-bound discounts
           {
@@ -427,13 +516,13 @@ exports.getApplicableDiscounts = async (req, res) => {
               {
                 [Op.or]: [
                   { startDate: null },
-                  { startDate: { [Op.lte]: now } }
-                ]
+                  { startDate: { [Op.lte]: now } },
+                ],
               },
-              { endDate: { [Op.gte]: now } }
-            ]
-          }
-        ]
+              { endDate: { [Op.gte]: now } },
+            ],
+          },
+        ],
       },
       include: [
         {
@@ -442,16 +531,24 @@ exports.getApplicableDiscounts = async (req, res) => {
           attributes: ["id"],
           through: { attributes: [] },
         },
+        {
+          model: Category,
+          as: "categories",
+          attributes: ["id"],
+          through: { attributes: [] },
+        },
       ],
       order: [["priority", "DESC"]],
     });
 
     // Filter discounts applicable to this product
-    const applicableDiscounts = discounts.filter(discount => {
+    const applicableDiscounts = discounts.filter((discount) => {
       if (discount.applicableTo === "ALL_PRODUCTS") {
         return true;
       } else if (discount.applicableTo === "SPECIFIC_PRODUCTS") {
-        return discount.products.some(p => p.id === parseInt(productId));
+        return discount.products.some((p) => p.id === parseInt(productId));
+      } else if (discount.applicableTo === "CATEGORIES") {
+        return discount.categories.some((c) => c.id === product.categoryId);
       }
       return false;
     });
@@ -482,6 +579,12 @@ exports.calculateProductDiscount = async (req, res) => {
           attributes: ["id"],
           through: { attributes: [] },
         },
+        {
+          model: Category,
+          as: "categories",
+          attributes: ["id"],
+          through: { attributes: [] },
+        },
       ],
     });
 
@@ -505,9 +608,22 @@ exports.calculateProductDiscount = async (req, res) => {
 
     // Check if applicable to this product
     if (discount.applicableTo === "SPECIFIC_PRODUCTS") {
-      const isApplicable = discount.products.some(p => p.id === parseInt(productId));
+      const isApplicable = discount.products.some(
+        (p) => p.id === parseInt(productId),
+      );
       if (!isApplicable) {
-        return res.status(400).json({ message: "Discount not applicable to this product" });
+        return res
+          .status(400)
+          .json({ message: "Discount not applicable to this product" });
+      }
+    } else if (discount.applicableTo === "CATEGORIES") {
+      const isApplicable = discount.categories.some(
+        (c) => c.id === product.categoryId,
+      );
+      if (!isApplicable) {
+        return res
+          .status(400)
+          .json({ message: "Discount not applicable to this product" });
       }
     }
 
