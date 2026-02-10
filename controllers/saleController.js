@@ -5,6 +5,7 @@ const {
   User,
   Discount,
   Category,
+  Stock
 } = require("../models");
 const { createLog } = require("../middleware/logMiddleware");
 
