@@ -1,4 +1,12 @@
-const { Sale, SaleItem, Product, User, Discount, Category } = require("../models");
+const {
+  Sale,
+  SaleItem,
+  Product,
+  User,
+  Discount,
+  Category,
+} = require("../models");
+const { createLog } = require("../middleware/logMiddleware");
 
 exports.createSale = async (req, res) => {
   try {
@@ -20,9 +28,9 @@ exports.createSale = async (req, res) => {
       const quantity = item.quantity;
 
       if (!productId || !quantity || quantity <= 0) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           message: "Invalid cart item format",
-          receivedItem: item 
+          receivedItem: item,
         });
       }
     }
@@ -62,7 +70,9 @@ exports.createSale = async (req, res) => {
 
       // Calculate discount if applied
       if (item.discountId && item.discountedPrice) {
-        const itemDiscount = (Number(product.price) - Number(item.discountedPrice)) * item.quantity;
+        const itemDiscount =
+          (Number(product.price) - Number(item.discountedPrice)) *
+          item.quantity;
         calculatedTotalDiscount += itemDiscount;
       }
     }
@@ -78,7 +88,10 @@ exports.createSale = async (req, res) => {
       });
     }
 
-    if (totalDiscount && Math.abs(calculatedTotalDiscount - totalDiscount) > 0.01) {
+    if (
+      totalDiscount &&
+      Math.abs(calculatedTotalDiscount - totalDiscount) > 0.01
+    ) {
       return res.status(400).json({
         message: "Total discount mismatch",
         calculated: calculatedTotalDiscount,
@@ -98,7 +111,7 @@ exports.createSale = async (req, res) => {
           changeAmount: cashAmount ? cashAmount - calculatedTotal : null,
           soldBy: req.user.id,
         },
-        { transaction: t }
+        { transaction: t },
       );
 
       // Create sale items and update stock
@@ -107,8 +120,8 @@ exports.createSale = async (req, res) => {
         const product = productMap.get(productId);
 
         // Determine final price (discounted or regular)
-        const finalPrice = item.discountedPrice 
-          ? Number(item.discountedPrice) 
+        const finalPrice = item.discountedPrice
+          ? Number(item.discountedPrice)
           : Number(product.price);
 
         // Create sale item
@@ -118,25 +131,45 @@ exports.createSale = async (req, res) => {
             productId: product.id,
             quantity: item.quantity,
             price: Number(product.price), // Original price
-            discountedPrice: item.discountedPrice ? Number(item.discountedPrice) : null,
+            discountedPrice: item.discountedPrice
+              ? Number(item.discountedPrice)
+              : null,
             discountId: item.discountId || null,
-            discountAmount: item.discountedPrice 
-              ? (Number(product.price) - Number(item.discountedPrice)) * item.quantity
+            discountAmount: item.discountedPrice
+              ? (Number(product.price) - Number(item.discountedPrice)) *
+                item.quantity
               : 0,
           },
-          { transaction: t }
+          { transaction: t },
         );
 
         // Update stock
-        await Product.decrement("quantity", {
-          by: item.quantity,
-          where: { id: product.id },
+        await Stock.createTransaction({
+          productId: product.id,
+          transactionType: "SALE",
+          quantity: -item.quantity,
+          referenceId: sale.id,
+          referenceType: "sale",
+          performedBy: req.user.id,
           transaction: t,
         });
       }
 
       return sale;
     });
+
+    await createLog(
+      req,
+      "SALE",
+      "sales",
+      result.id,
+      `Completed sale #${result.id} - Total: ₱${result.totalAmount}`,
+      {
+        items: cart.length,
+        total: result.totalAmount,
+        discount: totalDiscount,
+      },
+    );
 
     return res.status(201).json({
       message: "Sale recorded successfully",

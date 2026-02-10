@@ -30,10 +30,27 @@ module.exports = {
         type: Sequelize.DECIMAL(10, 2),
         allowNull: false,
       },
-      quantity: {
+      currentStock: {
         type: Sequelize.INTEGER,
         allowNull: false,
         defaultValue: 0,
+      },
+      minimumStock: {
+        type: Sequelize.INTEGER,
+        allowNull: true,
+        defaultValue: 10,
+        comment: "Minimum stock level for reorder alerts",
+      },
+      maximumStock: {
+        type: Sequelize.INTEGER,
+        allowNull: true,
+        comment: "Maximum stock level",
+      },
+      reorderPoint: {
+        type: Sequelize.INTEGER,
+        allowNull: true,
+        defaultValue: 20,
+        comment: "Stock level at which to reorder",
       },
       expiryDate: {
         type: Sequelize.DATE,
@@ -78,7 +95,15 @@ module.exports = {
         allowNull: false,
         type: Sequelize.DATE,
       },
+      status: {
+        type: Sequelize.ENUM("ACTIVE", "INACTIVE"),
+        allowNull: false,
+        defaultValue: "ACTIVE",
+        after: "requiresPrescription",
+      },
     });
+
+    await queryInterface.addIndex("products", ["currentStock"]);
   },
   down: async (queryInterface, Sequelize) => {
     await queryInterface.dropTable("products");

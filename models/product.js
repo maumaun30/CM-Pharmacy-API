@@ -15,6 +15,11 @@ module.exports = (sequelize, DataTypes) => {
         otherKey: "discountId",
         as: "discounts",
       });
+
+      Product.hasMany(models.Stock, {
+        foreignKey: "productId",
+        as: "stockHistory",
+      });
     }
 
     // Helper method to calculate margin percentage
@@ -51,11 +56,6 @@ module.exports = (sequelize, DataTypes) => {
       cost: {
         type: DataTypes.DECIMAL(10, 2),
         allowNull: false,
-      },
-      quantity: {
-        type: DataTypes.INTEGER,
-        allowNull: false,
-        defaultValue: 0,
       },
       expiryDate: {
         type: DataTypes.DATE,
@@ -114,13 +114,51 @@ module.exports = (sequelize, DataTypes) => {
           return price - cost;
         },
       },
+      currentStock: {
+        type: DataTypes.INTEGER,
+        allowNull: false,
+        defaultValue: 0,
+        comment: "Current stock quantity",
+      },
+      minimumStock: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        defaultValue: 10,
+        comment: "Minimum stock level for alerts",
+      },
+      maximumStock: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        comment: "Maximum stock level",
+      },
+      reorderPoint: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        defaultValue: 20,
+        comment: "Reorder point",
+      },
+
+      // Add virtual field for stock status
+      stockStatus: {
+        type: DataTypes.VIRTUAL,
+        get() {
+          const current = this.getDataValue("currentStock") || 0;
+          const reorder = this.getDataValue("reorderPoint") || 20;
+          const minimum = this.getDataValue("minimumStock") || 10;
+
+          if (current === 0) return "OUT_OF_STOCK";
+          if (current <= minimum) return "CRITICAL";
+          if (current <= reorder) return "LOW";
+          return "IN_STOCK";
+        },
+      },
     },
     {
       sequelize,
       modelName: "Product",
       tableName: "products",
       timestamps: true,
-    }
+    },
   );
 
   return Product;

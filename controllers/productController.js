@@ -1,5 +1,6 @@
 const { Product, Category } = require("../models");
 const { Op } = require("sequelize");
+const { createLog } = require("../middleware/logMiddleware");
 
 // Get all products with optional filters
 exports.getAllProducts = async (req, res) => {
@@ -166,6 +167,15 @@ exports.createProduct = async (req, res) => {
       ],
     });
 
+    await createLog(
+      req,
+      "CREATE",
+      "products",
+      newProduct.id,
+      `Created product: ${newProduct.name}`,
+      { product: newProduct.toJSON() },
+    );
+
     return res.status(201).json(productWithCategory);
   } catch (error) {
     return res
@@ -252,6 +262,18 @@ exports.updateProduct = async (req, res) => {
       ],
     });
 
+    await createLog(
+      req,
+      "UPDATE",
+      "products",
+      productId,
+      `Updated product: ${product.name}`,
+      {
+        before: { ...product._previousDataValues },
+        after: { ...product.toJSON() },
+      },
+    );
+
     return res.status(200).json(updatedProduct);
   } catch (error) {
     return res
@@ -271,6 +293,16 @@ exports.deleteProduct = async (req, res) => {
     }
 
     await product.destroy();
+
+    await createLog(
+      req,
+      "DELETE",
+      "products",
+      productId,
+      `Deleted product: ${product.name}`,
+      { product: product.toJSON() },
+    );
+
     return res.status(200).json({ message: "Product deleted successfully" });
   } catch (error) {
     return res

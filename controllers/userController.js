@@ -1,5 +1,6 @@
 const { User } = require("../models");
 const bcrypt = require("bcryptjs");
+const { createLog } = require("../middleware/logMiddleware");
 
 // Admin only: Get all users
 exports.getAllUsers = async (req, res) => {
@@ -43,6 +44,15 @@ exports.createUser = async (req, res) => {
       isActive,
     });
 
+    await createLog(
+      req,
+      "CREATE",
+      "users",
+      newUser.id,
+      `Created user: ${newUser.username}`,
+      { user: newUser.toJSON() },
+    );
+
     return res.status(201).json({
       message: "User created successfully",
       newUser,
@@ -70,6 +80,15 @@ exports.deleteUser = async (req, res) => {
     }
 
     await user.destroy();
+
+    await createLog(
+      req,
+      "DELETE",
+      "users",
+      userId,
+      `Deleted user: ${user.username}`,
+      { user: user.toJSON() },
+    );
 
     return res.status(200).json({
       message: "User deleted successfully",
@@ -107,6 +126,18 @@ exports.updateUser = async (req, res) => {
     if (isActive !== undefined) user.isActive = isActive;
 
     await user.save();
+
+    await createLog(
+      req,
+      "UPDATE",
+      "users",
+      userId,
+      `Updated user: ${user.username}`,
+      {
+        before: { ...user._previousDataValues },
+        after: { ...user.toJSON() },
+      },
+    );
 
     return res.status(200).json({
       message: "User updated successfully",

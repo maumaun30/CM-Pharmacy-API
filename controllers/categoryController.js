@@ -1,4 +1,5 @@
 const { Category, Product } = require("../models");
+const { createLog } = require("../middleware/logMiddleware");
 
 // Get all categories
 exports.getAllCategories = async (req, res) => {
@@ -58,6 +59,16 @@ exports.createCategory = async (req, res) => {
       description,
     });
 
+    await createLog(
+      req,
+      "CREATE",
+      "categories",
+      `Created category: ${newCategory.name}`,
+      {
+        category: newCategory.toJSON(),
+      },
+    );
+
     return res.status(201).json(newCategory);
   } catch (error) {
     return res
@@ -93,6 +104,17 @@ exports.updateCategory = async (req, res) => {
         description !== undefined ? description : category.description,
     });
 
+    await createLog(
+      req,
+      "UPDATE",
+      "categories",
+      `Updated category: ${category.name}`,
+      {
+        before: { ...category._previousDataValues },
+        after: { ...category.toJSON() },
+      },
+    );
+
     return res.status(200).json(category);
   } catch (error) {
     return res
@@ -121,6 +143,16 @@ exports.deleteCategory = async (req, res) => {
     }
 
     await category.destroy();
+
+    await createLog(
+      req,
+      "DELETE",
+      "categories",
+      categoryId,
+      `Deleted category: ${category.name}`,
+      { category: category.toJSON() },
+    );
+
     return res.status(200).json({ message: "Category deleted successfully" });
   } catch (error) {
     return res

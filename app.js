@@ -8,6 +8,7 @@ const authRoutes = require("./routes/authRoutes");
 const saleRoutes = require("./routes/saleRoutes");
 const stockRoutes = require("./routes/stockRoutes");
 const userRoutes = require("./routes/userRoutes");
+const logRoutes = require("./routes/logRoutes");
 
 const {
   authenticateUser,
@@ -32,10 +33,12 @@ app.use("/api/categories", authenticateUser, categoryRoutes);
 app.use("/api/products", authenticateUser, productRoutes);
 app.use("/api/discounts", authenticateUser, discountRoutes);
 
-app.use("/api/stocks", authenticateUser, stockRoutes);
+app.use("/api/stock", stockRoutes);
 app.use("/api/sales", authenticateUser, saleRoutes);
 
 app.use("/api/users", authenticateUser, userRoutes);
+
+app.use("/api/logs", logRoutes);
 
 // Basic route
 app.get("/", (req, res) => {

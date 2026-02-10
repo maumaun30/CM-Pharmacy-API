@@ -1,5 +1,6 @@
 const { Discount, Product, Category } = require("../models"); // ADD Category import
 const { Op } = require("sequelize");
+const { createLog } = require("../middleware/logMiddleware");
 
 // Get all discounts with optional filters
 exports.getAllDiscounts = async (req, res) => {

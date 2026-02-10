@@ -1,5 +1,6 @@
 const jwt = require("jsonwebtoken");
 const { User } = require("../models");
+const { createLog } = require("../middleware/logMiddleware");
 
 // Register new user
 exports.register = async (req, res) => {
@@ -94,6 +95,15 @@ exports.login = async (req, res) => {
       { expiresIn: process.env.JWT_EXPIRES_IN },
     );
 
+    await createLog(
+      req,
+      "LOGIN",
+      "auth",
+      user.id,
+      `User ${user.username} logged in`,
+      { role: user.role },
+    );
+
     return res.status(200).json({
       message: "Login successful",
       user: {
@@ -163,6 +173,18 @@ exports.updateProfile = async (req, res) => {
     if (password) user.password = password;
 
     await user.save();
+
+    await createLog(
+      req,
+      "UPDATE",
+      "auth",
+      user.id,
+      `Updated user: ${user.username}`,
+      {
+        before: { ...user._previousDataValues },
+        after: { ...user.toJSON() },
+      },
+    );
 
     return res.status(200).json({
       message: "Profile updated successfully",
