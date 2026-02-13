@@ -32,7 +32,7 @@ exports.register = async (req, res) => {
       username,
       email,
       password,
-      role: role || "staff", // Default to staff if not specified
+      role: role || "cashier",
     });
 
     // Create JWT token

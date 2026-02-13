@@ -52,9 +52,9 @@ module.exports = (sequelize, DataTypes) => {
         },
       },
       role: {
-        type: DataTypes.ENUM("admin", "staff", "manager"),
+        type: DataTypes.ENUM("admin", "cashier", "manager"),
         allowNull: false,
-        defaultValue: "staff",
+        defaultValue: "cashier",
       },
       firstName: {
         type: DataTypes.STRING,

@@ -26,7 +26,7 @@ module.exports = {
           username: "staff",
           email: "staff@pharmacy.com",
           password: hashedStaffPassword,
-          role: "staff",
+          role: "cashier",
           firstName: "Staff",
           lastName: "Staff",
           contactNumber: "1234567890",
