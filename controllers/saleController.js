@@ -5,13 +5,29 @@ const {
   User,
   Discount,
   Category,
-  Stock
+  Stock,
+  Branch,
 } = require("../models");
 const { createLog } = require("../middleware/logMiddleware");
 
 exports.createSale = async (req, res) => {
   try {
     const { cart, subtotal, totalDiscount, total, cashAmount } = req.body;
+
+    const user = await User.findByPk(req.user.id, {
+      include: [
+        { model: Branch, as: "branch" },
+        { model: Branch, as: "currentBranch" },
+      ],
+    });
+
+    const activeBranchId = user.currentBranchId || user.branchId;
+
+    if (!activeBranchId) {
+      return res.status(400).json({
+        message: "User is not assigned to any branch",
+      });
+    }
 
     // Validate user
     if (!req.user || !req.user.id) {
@@ -111,6 +127,7 @@ exports.createSale = async (req, res) => {
           cashAmount: cashAmount || null,
           changeAmount: cashAmount ? cashAmount - calculatedTotal : null,
           soldBy: req.user.id,
+          branchId: activeBranchId,
         },
         { transaction: t },
       );
@@ -152,6 +169,7 @@ exports.createSale = async (req, res) => {
           referenceId: sale.id,
           referenceType: "sale",
           performedBy: req.user.id,
+          branchId: activeBranchId,
           transaction: t,
         });
       }
@@ -192,7 +210,33 @@ exports.createSale = async (req, res) => {
 
 exports.getSales = async (req, res) => {
   try {
+    const user = await User.findByPk(req.user.id, {
+      include: [
+        { model: Branch, as: "branch" },
+        { model: Branch, as: "currentBranch" },
+      ],
+    });
+
+    const activeBranchId = user.currentBranchId || user.branchId;
+
+    if (!activeBranchId) {
+      return res.status(400).json({
+        message: "User is not assigned to any branch",
+      });
+    }
+
+    const whereClause = {};
+
+    if (user.role !== "admin") {
+      whereClause.branchId = activeBranchId;
+    } else {
+      if (user.currentBranchId) {
+        whereClause.branchId = user.currentBranchId;
+      }
+    }
+
     const sales = await Sale.findAll({
+      where: whereClause,
       order: [["soldAt", "DESC"]],
       include: [
         {
@@ -215,7 +259,13 @@ exports.getSales = async (req, res) => {
         {
           model: User,
           as: "seller",
-          attributes: ["id", "username", "email"], // CHANGED: name -> username
+          attributes: ["id", "username", "email", "firstName", "lastName"],
+          required: false,
+        },
+        {
+          model: Branch,
+          as: "branch",
+          attributes: ["id", "name", "code"],
           required: false,
         },
       ],
@@ -223,6 +273,13 @@ exports.getSales = async (req, res) => {
 
     const response = sales.map((sale) => ({
       id: sale.id,
+      branch: sale.branch
+        ? {
+            id: sale.branch.id,
+            name: sale.branch.name,
+            code: sale.branch.code,
+          }
+        : null,
       subtotal: sale.subtotal ? parseFloat(sale.subtotal) : null,
       totalDiscount: sale.totalDiscount ? parseFloat(sale.totalDiscount) : 0,
       totalAmount: parseFloat(sale.totalAmount),
@@ -233,7 +290,7 @@ exports.getSales = async (req, res) => {
       seller: sale.seller
         ? {
             id: sale.seller.id,
-            name: sale.seller.username, // CHANGED: Map username to name for frontend
+            name: sale.seller.fullName,
             email: sale.seller.email,
           }
         : null,

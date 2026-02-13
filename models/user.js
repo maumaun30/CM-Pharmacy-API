@@ -5,12 +5,24 @@ const bcrypt = require("bcryptjs");
 module.exports = (sequelize, DataTypes) => {
   class User extends Model {
     static associate(models) {
-      // Define associations here if needed
+      User.belongsTo(models.Branch, {
+        foreignKey: "branchId",
+        as: "branch",
+      });
+
+      User.belongsTo(models.Branch, {
+        foreignKey: "currentBranchId",
+        as: "currentBranch",
+      });
     }
 
     // Method to check password
     async validatePassword(password) {
       return await bcrypt.compare(password, this.password);
+    }
+
+    getActiveBranch() {
+      return this.currentBranchId || this.branchId;
     }
   }
 
@@ -44,6 +56,42 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: "staff",
       },
+      firstName: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+      lastName: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+      fullName: {
+        type: DataTypes.VIRTUAL,
+        get() {
+          return `${this.firstName} ${this.lastName}`;
+        },
+      },
+      contactNumber: {
+        type: DataTypes.STRING,
+        allowNull: true,
+      },
+      branchId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        references: {
+          model: "branches",
+          key: "id",
+        },
+        comment: "User's home branch",
+      },
+      currentBranchId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        references: {
+          model: "branches",
+          key: "id",
+        },
+        comment: "Current active branch (for session)",
+      },
       isActive: {
         type: DataTypes.BOOLEAN,
         allowNull: false,
@@ -69,7 +117,7 @@ module.exports = (sequelize, DataTypes) => {
           }
         },
       },
-    }
+    },
   );
 
   return User;

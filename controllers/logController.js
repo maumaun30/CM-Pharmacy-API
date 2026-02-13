@@ -62,7 +62,15 @@ exports.getAllLogs = async (req, res) => {
         {
           model: User,
           as: "user",
-          attributes: ["id", "username", "email", "role"],
+          attributes: [
+            "id",
+            "username",
+            "email",
+            "firstName",
+            "lastName",
+            "fullName",
+            "role",
+          ],
         },
       ],
       order: [["createdAt", "DESC"]],

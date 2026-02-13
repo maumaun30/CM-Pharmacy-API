@@ -14,4 +14,13 @@ router.post("/login", authController.login);
 router.get("/profile", authenticateUser, authController.getProfile);
 router.put("/profile", authenticateUser, authController.updateProfile);
 
+router.post(
+  "/switch-branch",
+  authenticateUser,
+  authorizeRoles("admin"),
+  authController.switchBranch,
+);
+
+router.get("/me", authenticateUser, authController.getCurrentUser);
+
 module.exports = router;

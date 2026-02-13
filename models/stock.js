@@ -13,6 +13,11 @@ module.exports = (sequelize, DataTypes) => {
         foreignKey: "performedBy",
         as: "user",
       });
+
+      Stock.belongsTo(models.Branch, {
+        foreignKey: "branchId",
+        as: "branch",
+      });
     }
 
     // Helper method to create stock transaction
@@ -66,14 +71,11 @@ module.exports = (sequelize, DataTypes) => {
           reason,
           performedBy,
         },
-        { transaction }
+        { transaction },
       );
 
       // Update product current stock
-      await product.update(
-        { currentStock: quantityAfter },
-        { transaction }
-      );
+      await product.update({ currentStock: quantityAfter }, { transaction });
 
       return stockRecord;
     }
@@ -89,6 +91,14 @@ module.exports = (sequelize, DataTypes) => {
           key: "id",
         },
       },
+      branchId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        references: {
+          model: "branches",
+          key: "id",
+        },
+      },
       transactionType: {
         type: DataTypes.ENUM(
           "INITIAL_STOCK",
@@ -97,7 +107,7 @@ module.exports = (sequelize, DataTypes) => {
           "RETURN",
           "ADJUSTMENT",
           "DAMAGE",
-          "EXPIRED"
+          "EXPIRED",
         ),
         allowNull: false,
       },
@@ -160,7 +170,7 @@ module.exports = (sequelize, DataTypes) => {
       tableName: "stocks",
       timestamps: true,
       updatedAt: false,
-    }
+    },
   );
 
   return Stock;

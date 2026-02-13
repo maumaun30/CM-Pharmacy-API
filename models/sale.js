@@ -8,9 +8,15 @@ module.exports = (sequelize, DataTypes) => {
         foreignKey: "saleId",
         as: "items",
       });
+
       Sale.belongsTo(models.User, {
         foreignKey: "soldBy",
         as: "seller",
+      });
+
+      Sale.belongsTo(models.Branch, {
+        foreignKey: "branchId",
+        as: "branch",
       });
     }
   }
@@ -56,6 +62,14 @@ module.exports = (sequelize, DataTypes) => {
         allowNull: false,
         defaultValue: DataTypes.NOW,
       },
+      branchId: {
+        type: DataTypes.INTEGER,
+        allowNull: true,
+        references: {
+          model: "branches",
+          key: "id",
+        },
+      },
     },
     {
       sequelize,
@@ -64,7 +78,7 @@ module.exports = (sequelize, DataTypes) => {
       timestamps: true,
       createdAt: "soldAt",
       updatedAt: true,
-    }
+    },
   );
 
   return Sale;

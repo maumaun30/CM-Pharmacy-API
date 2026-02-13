@@ -8,6 +8,17 @@ module.exports = {
         autoIncrement: true,
         primaryKey: true,
       },
+      branchId: {
+        type: Sequelize.INTEGER,
+        allowNull: true,
+        references: {
+          model: "branches",
+          key: "id",
+        },
+        onUpdate: "CASCADE",
+        onDelete: "RESTRICT",
+        comment: "Branch for this stock transaction",
+      },
       productId: {
         type: Sequelize.INTEGER,
         allowNull: false,
@@ -26,7 +37,7 @@ module.exports = {
           "RETURN",
           "ADJUSTMENT",
           "DAMAGE",
-          "EXPIRED"
+          "EXPIRED",
         ),
         allowNull: false,
         comment: "Type of stock transaction",
@@ -34,7 +45,8 @@ module.exports = {
       quantity: {
         type: Sequelize.INTEGER,
         allowNull: false,
-        comment: "Quantity change (positive for addition, negative for reduction)",
+        comment:
+          "Quantity change (positive for addition, negative for reduction)",
       },
       quantityBefore: {
         type: Sequelize.INTEGER,
@@ -74,7 +86,8 @@ module.exports = {
       referenceId: {
         type: Sequelize.INTEGER,
         allowNull: true,
-        comment: "Reference to related record (e.g., sale_id, purchase_order_id)",
+        comment:
+          "Reference to related record (e.g., sale_id, purchase_order_id)",
       },
       referenceType: {
         type: Sequelize.STRING,
@@ -104,6 +117,7 @@ module.exports = {
     });
 
     // Add indexes
+    await queryInterface.addIndex("stocks", ["branchId"]);
     await queryInterface.addIndex("stocks", ["productId"]);
     await queryInterface.addIndex("stocks", ["transactionType"]);
     await queryInterface.addIndex("stocks", ["createdAt"]);

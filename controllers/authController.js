@@ -1,5 +1,5 @@
 const jwt = require("jsonwebtoken");
-const { User } = require("../models");
+const { User, Branch } = require("../models");
 const { createLog } = require("../middleware/logMiddleware");
 
 // Register new user
@@ -199,5 +199,110 @@ exports.updateProfile = async (req, res) => {
     return res
       .status(500)
       .json({ message: "Server error", error: error.message });
+  }
+};
+
+exports.switchBranch = async (req, res) => {
+  try {
+    const { branchId } = req.body;
+    const userId = req.user.id;
+
+    // Only admins can switch branches
+    if (req.user.role !== "admin") {
+      return res.status(403).json({
+        message: "Only admins can switch branches",
+      });
+    }
+
+    // Verify branch exists and is active
+    const branch = await Branch.findOne({
+      where: { id: branchId, isActive: true },
+    });
+
+    if (!branch) {
+      return res.status(404).json({
+        message: "Branch not found or inactive",
+      });
+    }
+
+    // Update current branch
+    await User.update({ currentBranchId: branchId }, { where: { id: userId } });
+
+    await createLog(
+      req,
+      "UPDATE",
+      "users",
+      userId,
+      `Switched to branch: ${branch.name}`,
+      { branchId, branchName: branch.name },
+    );
+
+    return res.status(200).json({
+      message: `Switched to ${branch.name}`,
+      currentBranch: branch,
+    });
+  } catch (error) {
+    console.error("Error switching branch:", error);
+    return res.status(500).json({
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
+
+exports.resetToBranchHome = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    await User.update({ currentBranchId: null }, { where: { id: userId } });
+
+    return res.status(200).json({
+      message: "Reset to home branch",
+    });
+  } catch (error) {
+    console.error("Error resetting branch:", error);
+    return res.status(500).json({
+      message: "Server error",
+      error: error.message,
+    });
+  }
+};
+
+exports.getCurrentUser = async (req, res) => {
+  try {
+    const user = await User.findByPk(req.user.id, {
+      attributes: {
+        exclude: ["password"], // Don't send password
+      },
+      include: [
+        {
+          model: Branch,
+          as: "branch",
+          attributes: ["id", "name", "code", "isActive", "email", "phone"],
+          required: false, // LEFT JOIN - user might not have a branch
+        },
+        {
+          model: Branch,
+          as: "currentBranch",
+          attributes: ["id", "name", "code", "isActive", "email", "phone"],
+          required: false,
+        },
+      ],
+    });
+
+    if (!user) {
+      return res.status(404).json({ message: "User not found" });
+    }
+
+    // Convert to JSON and clean up
+    const userData = user.toJSON();
+
+    return res.status(200).json(userData);
+  } catch (error) {
+    console.error("Error fetching current user:", error);
+    return res.status(500).json({
+      message: "Server error",
+      error: error.message,
+    });
   }
 };

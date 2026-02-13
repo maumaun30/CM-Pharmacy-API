@@ -19,7 +19,16 @@ exports.getAllUsers = async (req, res) => {
 
 exports.createUser = async (req, res) => {
   try {
-    const { username, email, role, isActive } = req.body;
+    const {
+      username,
+      email,
+      role,
+      firstName,
+      lastName,
+      contactNumber,
+      isActive,
+      branchId,
+    } = req.body;
     const hashedPassword = await bcrypt.hash("staff123", 10);
 
     // Check if email already exists
@@ -39,9 +48,13 @@ exports.createUser = async (req, res) => {
     const newUser = await User.create({
       username,
       email,
-      password: hashedPassword, // default password
+      password: hashedPassword,
       role,
+      firstName,
+      lastName,
+      contactNumber,
       isActive,
+      branchId,
     });
 
     await createLog(
@@ -103,7 +116,16 @@ exports.deleteUser = async (req, res) => {
 // Admin only: Update user (including role)
 exports.updateUser = async (req, res) => {
   try {
-    const { username, email, role, isActive } = req.body;
+    const {
+      username,
+      email,
+      role,
+      firstName,
+      lastName,
+      contactNumber,
+      isActive,
+      branchId,
+    } = req.body;
     const userId = req.params.id;
 
     const user = await User.findByPk(userId);
@@ -123,7 +145,11 @@ exports.updateUser = async (req, res) => {
     if (username) user.username = username;
     if (email) user.email = email;
     if (role) user.role = role;
+    if (firstName) user.firstName = firstName;
+    if (lastName) user.lastName = lastName;
+    if (contactNumber) user.contactNumber = contactNumber;
     if (isActive !== undefined) user.isActive = isActive;
+    if (branchId) user.branchId = branchId;
 
     await user.save();
 
@@ -146,7 +172,11 @@ exports.updateUser = async (req, res) => {
         username: user.username,
         email: user.email,
         role: user.role,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        contactNumber: user.contactNumber,
         isActive: user.isActive,
+        branchId: user.branchId,
       },
     });
   } catch (error) {
