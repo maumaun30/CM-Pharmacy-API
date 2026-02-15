@@ -44,6 +44,12 @@ app.use("/api/branches", authenticateUser, branchRoutes);
 
 app.use("/api/logs", authenticateUser, logRoutes);
 
+app.use(
+  "/api/dashboard/stats",
+  authenticateUser,
+  require("./controllers/dashboardController").getDashboardStats,
+);
+
 // Basic route
 app.get("/", (req, res) => {
   res.json({ message: "Welcome to Pharmacy POS API" });
