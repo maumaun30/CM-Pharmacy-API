@@ -2,6 +2,7 @@
 const { Stock, Product, User, Branch } = require("../models");
 const { Op } = require("sequelize");
 const { createLog } = require("../middleware/logMiddleware");
+const { emitStockUpdate, emitLowStockAlert, emitDashboardRefresh } = require("../utils/socket");
 
 // Helper function to get user's active branch
 const getUserActiveBranch = async (userId) => {
@@ -233,7 +234,7 @@ exports.addStock = async (req, res) => {
         {
           model: Product,
           as: "product",
-          attributes: ["id", "name", "sku", "currentStock"],
+          attributes: ["id", "name", "sku", "currentStock", "reorderPoint", "minimumStock"],
         },
         {
           model: Branch,
@@ -242,6 +243,33 @@ exports.addStock = async (req, res) => {
         },
       ],
     });
+
+    // ✨ REAL-TIME: Emit stock update event
+    emitStockUpdate({
+      productId: stockWithProduct.product.id,
+      productName: stockWithProduct.product.name,
+      sku: stockWithProduct.product.sku,
+      currentStock: stockWithProduct.product.currentStock,
+      transactionType: stockWithProduct.transactionType,
+      quantity: stockWithProduct.quantity,
+      branchId: stockWithProduct.branchId,
+    });
+
+    // ✨ REAL-TIME: Check if stock is low and emit alert
+    const product = stockWithProduct.product;
+    if (product.currentStock <= product.reorderPoint) {
+      emitLowStockAlert({
+        id: product.id,
+        name: product.name,
+        sku: product.sku,
+        currentStock: product.currentStock,
+        reorderPoint: product.reorderPoint,
+        minimumStock: product.minimumStock,
+      });
+    }
+
+    // ✨ REAL-TIME: Trigger dashboard refresh
+    emitDashboardRefresh(activeBranchId);
 
     return res.status(201).json(stockWithProduct);
   } catch (error) {
@@ -295,7 +323,7 @@ exports.adjustStock = async (req, res) => {
         {
           model: Product,
           as: "product",
-          attributes: ["id", "name", "sku", "currentStock"],
+          attributes: ["id", "name", "sku", "currentStock", "reorderPoint", "minimumStock"],
         },
         {
           model: Branch,
@@ -304,6 +332,33 @@ exports.adjustStock = async (req, res) => {
         },
       ],
     });
+
+    // ✨ REAL-TIME: Emit stock update event
+    emitStockUpdate({
+      productId: stockWithProduct.product.id,
+      productName: stockWithProduct.product.name,
+      sku: stockWithProduct.product.sku,
+      currentStock: stockWithProduct.product.currentStock,
+      transactionType: stockWithProduct.transactionType,
+      quantity: stockWithProduct.quantity,
+      branchId: stockWithProduct.branchId,
+    });
+
+    // ✨ REAL-TIME: Check if stock is now low and emit alert
+    const product = stockWithProduct.product;
+    if (product.currentStock <= product.reorderPoint) {
+      emitLowStockAlert({
+        id: product.id,
+        name: product.name,
+        sku: product.sku,
+        currentStock: product.currentStock,
+        reorderPoint: product.reorderPoint,
+        minimumStock: product.minimumStock,
+      });
+    }
+
+    // ✨ REAL-TIME: Trigger dashboard refresh
+    emitDashboardRefresh(activeBranchId);
 
     return res.status(201).json(stockWithProduct);
   } catch (error) {
@@ -365,7 +420,7 @@ exports.recordStockLoss = async (req, res) => {
         {
           model: Product,
           as: "product",
-          attributes: ["id", "name", "sku", "currentStock"],
+          attributes: ["id", "name", "sku", "currentStock", "reorderPoint", "minimumStock"],
         },
         {
           model: Branch,
@@ -374,6 +429,33 @@ exports.recordStockLoss = async (req, res) => {
         },
       ],
     });
+
+    // ✨ REAL-TIME: Emit stock update event
+    emitStockUpdate({
+      productId: stockWithProduct.product.id,
+      productName: stockWithProduct.product.name,
+      sku: stockWithProduct.product.sku,
+      currentStock: stockWithProduct.product.currentStock,
+      transactionType: stockWithProduct.transactionType,
+      quantity: stockWithProduct.quantity,
+      branchId: stockWithProduct.branchId,
+    });
+
+    // ✨ REAL-TIME: Check if stock is now low and emit alert
+    const product = stockWithProduct.product;
+    if (product.currentStock <= product.reorderPoint) {
+      emitLowStockAlert({
+        id: product.id,
+        name: product.name,
+        sku: product.sku,
+        currentStock: product.currentStock,
+        reorderPoint: product.reorderPoint,
+        minimumStock: product.minimumStock,
+      });
+    }
+
+    // ✨ REAL-TIME: Trigger dashboard refresh
+    emitDashboardRefresh(activeBranchId);
 
     return res.status(201).json(stockWithProduct);
   } catch (error) {

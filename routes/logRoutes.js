@@ -7,26 +7,16 @@ const {
   authorizeRoles,
 } = require("../middleware/authMiddleware");
 
-// All log routes require admin access
-router.get(
-  "/",
-  authenticateUser,
-  authorizeRoles("admin"),
-  logController.getAllLogs
-);
+router.use(authenticateUser);
 
-router.get(
-  "/stats",
-  authenticateUser,
-  authorizeRoles("admin"),
-  logController.getLogStats
-);
+router.get("/", authorizeRoles("admin"), logController.getAllLogs);
+
+router.get("/stats", authorizeRoles("admin"), logController.getLogStats);
 
 router.get(
   "/:module/:recordId",
-  authenticateUser,
   authorizeRoles("admin"),
-  logController.getRecordLogs
+  logController.getRecordLogs,
 );
 
 module.exports = router;

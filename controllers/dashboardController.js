@@ -1,4 +1,4 @@
-const { Sale, Product, Stock, User, sequelize } = require("../models");
+const { Sale, Product, User, sequelize } = require("../models");
 const { Op } = require("sequelize");
 
 /**
@@ -7,22 +7,24 @@ const { Op } = require("sequelize");
  */
 exports.getDashboardStats = async (req, res) => {
   try {
+    console.log("📊 Dashboard accessed by:", {
+      id: req.user.id,
+      role: req.user.role,
+      username: req.user.username,
+    });
+
     const userId = req.user.id;
     const userRole = req.user.role;
     const userBranchId = req.user.branchId;
     const currentBranchId = req.user.currentBranchId;
 
     // Determine which branch to filter by
-    // Admin viewing all branches: no filter
-    // Admin viewing specific branch: filter by currentBranchId
-    // Regular users: filter by their branchId
     let branchFilter = {};
     if (userRole === "admin" && currentBranchId) {
       branchFilter = { branchId: currentBranchId };
     } else if (userRole !== "admin") {
       branchFilter = { branchId: userBranchId };
     }
-    // If admin and no currentBranchId, branchFilter remains empty (all branches)
 
     // Get today's date range (start and end of day)
     const today = new Date();
@@ -33,8 +35,8 @@ exports.getDashboardStats = async (req, res) => {
     // 1. Today's Sales Amount and Transaction Count
     const todaySalesData = await Sale.findOne({
       attributes: [
-        [sequelize.fn("COUNT", sequelize.col("id")), "transactionCount"],
-        [sequelize.fn("SUM", sequelize.col("totalAmount")), "totalSales"],
+        [sequelize.fn("COUNT", sequelize.col("Sale.id")), "transactionCount"],
+        [sequelize.fn("SUM", sequelize.col("Sale.totalAmount")), "totalSales"],
       ],
       where: {
         soldAt: {
@@ -50,7 +52,6 @@ exports.getDashboardStats = async (req, res) => {
     const todayTransactions = parseInt(todaySalesData?.transactionCount || 0);
 
     // 2. Low Stock Count
-    // Products where currentStock <= reorderPoint
     const lowStockCount = await Product.count({
       where: {
         currentStock: {
@@ -67,7 +68,7 @@ exports.getDashboardStats = async (req, res) => {
       },
     });
 
-    // 4. Recent Sales (last 5-10 transactions)
+    // 4. Recent Sales (last 10 transactions)
     const recentSales = await Sale.findAll({
       where: branchFilter,
       include: [
@@ -75,6 +76,7 @@ exports.getDashboardStats = async (req, res) => {
           model: User,
           as: "seller",
           attributes: ["id", "username", "firstName", "lastName"],
+          required: false, // ✅ LEFT JOIN instead of INNER JOIN
         },
       ],
       order: [["soldAt", "DESC"]],
@@ -89,14 +91,13 @@ exports.getDashboardStats = async (req, res) => {
       totalAmount: parseFloat(sale.totalAmount),
       user: {
         fullName: sale.seller
-          ? `${sale.seller.firstName || ""} ${sale.seller.lastName || ""}`.trim()
+          ? `${sale.seller.firstName || ""} ${sale.seller.lastName || ""}`.trim() || sale.seller.username
           : "Unknown",
         username: sale.seller?.username || "unknown",
       },
     }));
 
-    // 5. Additional useful stats (optional but recommended)
-    // Out of stock count
+    // 5. Additional stats
     const outOfStockCount = await Product.count({
       where: {
         currentStock: 0,
@@ -104,7 +105,6 @@ exports.getDashboardStats = async (req, res) => {
       },
     });
 
-    // Critical stock count (below minimum stock)
     const criticalStockCount = await Product.count({
       where: {
         currentStock: {
@@ -115,6 +115,8 @@ exports.getDashboardStats = async (req, res) => {
       },
     });
 
+    console.log("✅ Dashboard stats successfully fetched");
+
     // Return dashboard stats
     res.json({
       todaySales,
@@ -122,12 +124,15 @@ exports.getDashboardStats = async (req, res) => {
       lowStockCount,
       totalProducts,
       recentSales: formattedRecentSales,
-      // Additional stats
       outOfStockCount,
       criticalStockCount,
     });
   } catch (error) {
-    console.error("Dashboard stats error:", error);
+    console.error("❌ Dashboard stats error:", error);
+    console.error("Error details:", {
+      message: error.message,
+      stack: error.stack,
+    });
     res.status(500).json({
       message: "Error fetching dashboard statistics",
       error: error.message,
@@ -136,7 +141,7 @@ exports.getDashboardStats = async (req, res) => {
 };
 
 /**
- * Get weekly sales trend (optional - for charts)
+ * Get weekly sales trend
  * GET /api/dashboard/weekly-trend
  */
 exports.getWeeklySalesTrend = async (req, res) => {
@@ -192,7 +197,7 @@ exports.getWeeklySalesTrend = async (req, res) => {
 };
 
 /**
- * Get top selling products (optional)
+ * Get top selling products
  * GET /api/dashboard/top-products
  */
 exports.getTopProducts = async (req, res) => {
@@ -203,16 +208,21 @@ exports.getTopProducts = async (req, res) => {
     const userBranchId = req.user.branchId;
     const currentBranchId = req.user.currentBranchId;
 
-    let branchFilter = {};
+    let branchCondition = "";
+    const replacements = { limit };
+
     if (userRole === "admin" && currentBranchId) {
-      branchFilter = { "$Sale.branchId$": currentBranchId };
+      branchCondition = "AND s.branchId = :branchId";
+      replacements.branchId = currentBranchId;
     } else if (userRole !== "admin") {
-      branchFilter = { "$Sale.branchId$": userBranchId };
+      branchCondition = "AND s.branchId = :branchId";
+      replacements.branchId = userBranchId;
     }
 
     // Get products with most sales in last 30 days
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+    replacements.thirtyDaysAgo = thirtyDaysAgo;
 
     const topProducts = await sequelize.query(
       `
@@ -228,18 +238,13 @@ exports.getTopProducts = async (req, res) => {
       INNER JOIN sale_items si ON p.id = si.productId
       INNER JOIN sales s ON si.saleId = s.id
       WHERE s.soldAt >= :thirtyDaysAgo
-        ${currentBranchId ? "AND s.branchId = :branchId" : ""}
-        ${userRole !== "admin" ? "AND s.branchId = :branchId" : ""}
+        ${branchCondition}
       GROUP BY p.id, p.name, p.sku, p.price
       ORDER BY totalQuantitySold DESC
       LIMIT :limit
     `,
       {
-        replacements: {
-          thirtyDaysAgo,
-          branchId: currentBranchId || userBranchId,
-          limit,
-        },
+        replacements,
         type: sequelize.QueryTypes.SELECT,
       },
     );

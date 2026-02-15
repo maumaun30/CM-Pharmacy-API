@@ -1,4 +1,5 @@
 const express = require("express");
+const http = require("http");
 const cors = require("cors");
 const dotenv = require("dotenv");
 const categoryRoutes = require("./routes/categoryRoutes");
@@ -10,45 +11,40 @@ const stockRoutes = require("./routes/stockRoutes");
 const userRoutes = require("./routes/userRoutes");
 const logRoutes = require("./routes/logRoutes");
 const branchRoutes = require("./routes/branchRoutes");
+const dashboardRoutes = require("./routes/dashboardRoutes");
 
-const {
-  authenticateUser,
-  authorizeRoles,
-} = require("./middleware/authMiddleware");
+const { initializeSocket } = require("./utils/socket");
 
 // Load environment variables
 dotenv.config();
 
 const app = express();
+const server = http.createServer(app);
+
+const io = initializeSocket(server);
 
 // Middleware
-app.use(cors());
+app.use(
+  cors({
+    origin: process.env.CLIENT_URL || "http://localhost:3000",
+    credentials: true,
+  }),
+);
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
 // Routes
 app.use("/api/auth", authRoutes);
 
-// Protected routes
-app.use("/api/categories", authenticateUser, categoryRoutes);
-app.use("/api/products", authenticateUser, productRoutes);
-app.use("/api/discounts", authenticateUser, discountRoutes);
-
-app.use("/api/sales", authenticateUser, saleRoutes);
-
-app.use("/api/users", authenticateUser, userRoutes);
-
-app.use("/api/stock", authenticateUser, stockRoutes);
-
-app.use("/api/branches", authenticateUser, branchRoutes);
-
-app.use("/api/logs", authenticateUser, logRoutes);
-
-app.use(
-  "/api/dashboard/stats",
-  authenticateUser,
-  require("./controllers/dashboardController").getDashboardStats,
-);
+app.use("/api/categories", categoryRoutes);
+app.use("/api/products", productRoutes);
+app.use("/api/discounts", discountRoutes);
+app.use("/api/sales", saleRoutes);
+app.use("/api/users", userRoutes);
+app.use("/api/stock", stockRoutes);
+app.use("/api/branches", branchRoutes);
+app.use("/api/logs", logRoutes);
+app.use("/api/dashboard", dashboardRoutes);
 
 // Basic route
 app.get("/", (req, res) => {
@@ -63,5 +59,7 @@ app.use((err, req, res, next) => {
     error: process.env.NODE_ENV === "development" ? err.message : {},
   });
 });
+
+app.set("server", server);
 
 module.exports = app;

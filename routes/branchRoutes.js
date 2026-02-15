@@ -7,44 +7,27 @@ const {
   authorizeRoles,
 } = require("../middleware/authMiddleware");
 
+router.use(authenticateUser);
+
 // Public routes (authenticated users can view)
-router.get("/", authenticateUser, branchController.getAllBranches);
-router.get("/:id", authenticateUser, branchController.getBranchById);
+router.get("/", branchController.getAllBranches);
+router.get("/:id", branchController.getBranchById);
 
 // Admin-only routes
 router.get(
   "/:id/stats",
-  authenticateUser,
   authorizeRoles("admin"),
-  branchController.getBranchStats
+  branchController.getBranchStats,
 );
 
-router.post(
-  "/",
-  authenticateUser,
-  authorizeRoles("admin"),
-  branchController.createBranch
-);
-
-router.put(
-  "/:id",
-  authenticateUser,
-  authorizeRoles("admin"),
-  branchController.updateBranch
-);
-
-router.delete(
-  "/:id",
-  authenticateUser,
-  authorizeRoles("admin"),
-  branchController.deleteBranch
-);
+router.post("/", authorizeRoles("admin"), branchController.createBranch);
+router.put("/:id", authorizeRoles("admin"), branchController.updateBranch);
+router.delete("/:id", authorizeRoles("admin"), branchController.deleteBranch);
 
 router.patch(
   "/:id/toggle",
-  authenticateUser,
   authorizeRoles("admin"),
-  branchController.toggleBranchStatus
+  branchController.toggleBranchStatus,
 );
 
 module.exports = router;

@@ -9,6 +9,7 @@ const {
   Branch,
 } = require("../models");
 const { createLog } = require("../middleware/logMiddleware");
+const { emitNewSale, emitDashboardRefresh } = require("../utils/socket");
 
 exports.createSale = async (req, res) => {
   try {
@@ -189,6 +190,34 @@ exports.createSale = async (req, res) => {
         discount: totalDiscount,
       },
     );
+
+    // ✨ REAL-TIME: Fetch complete sale with user data for socket emission
+    const completeSale = await Sale.findByPk(result.id, {
+      include: [
+        {
+          model: User,
+          as: "seller",
+          attributes: ["id", "username", "firstName", "lastName"],
+        },
+      ],
+    });
+
+    // ✨ REAL-TIME: Emit new sale event via Socket.IO
+    emitNewSale({
+      id: completeSale.id,
+      totalAmount: parseFloat(completeSale.totalAmount),
+      soldAt: completeSale.soldAt,
+      branchId: completeSale.branchId,
+      user: {
+        fullName: completeSale.seller
+          ? `${completeSale.seller.firstName || ""} ${completeSale.seller.lastName || ""}`.trim()
+          : "Unknown",
+        username: completeSale.seller?.username || "unknown",
+      },
+    });
+
+    // ✨ REAL-TIME: Trigger dashboard refresh for all connected clients
+    emitDashboardRefresh(completeSale.branchId);
 
     return res.status(201).json({
       message: "Sale recorded successfully",

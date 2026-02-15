@@ -14,12 +14,15 @@ const testDbConnection = async () => {
   }
 };
 
+const server = app.get("server");
+
 // Start server
 const startServer = async () => {
   await testDbConnection();
 
-  app.listen(PORT, () => {
+  server.listen(PORT, () => {
     console.log(`Server is running on port ${PORT}`);
+    console.log(`Socket.IO initialized`);
   });
 };
 
