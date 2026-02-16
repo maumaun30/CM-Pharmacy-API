@@ -9,7 +9,7 @@ const {
   Branch,
 } = require("../models");
 const { createLog } = require("../middleware/logMiddleware");
-const { emitNewSale, emitDashboardRefresh } = require("../utils/socket");
+const { emitNewSale, emitDashboardRefresh, emitStockUpdate } = require("../utils/socket");
 
 exports.createSale = async (req, res) => {
   try {
@@ -117,6 +117,9 @@ exports.createSale = async (req, res) => {
       });
     }
 
+    // ✨ REAL-TIME: Track stock updates for socket emission
+    const stockUpdates = [];
+
     // Wrap everything in a transaction
     const result = await Product.sequelize.transaction(async (t) => {
       // Create sale record
@@ -173,6 +176,14 @@ exports.createSale = async (req, res) => {
           branchId: activeBranchId,
           transaction: t,
         });
+
+        // ✨ REAL-TIME: Calculate new stock level for this product
+        const newStockLevel = product.quantity - item.quantity;
+        stockUpdates.push({
+          productId: product.id,
+          newStock: newStockLevel,
+          branchId: activeBranchId,
+        });
       }
 
       return sale;
@@ -215,6 +226,16 @@ exports.createSale = async (req, res) => {
         username: completeSale.seller?.username || "unknown",
       },
     });
+
+    // ✨ REAL-TIME: Emit stock updates for each affected product
+    for (const stockUpdate of stockUpdates) {
+      emitStockUpdate(stockUpdate.branchId, {
+        productId: stockUpdate.productId,
+        newStock: stockUpdate.newStock,
+      });
+      
+      console.log(`📦 Stock update emitted: Product ${stockUpdate.productId} -> ${stockUpdate.newStock} units (Branch ${stockUpdate.branchId})`);
+    }
 
     // ✨ REAL-TIME: Trigger dashboard refresh for all connected clients
     emitDashboardRefresh(completeSale.branchId);
