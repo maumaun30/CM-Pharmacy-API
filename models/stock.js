@@ -20,9 +20,10 @@ module.exports = (sequelize, DataTypes) => {
       });
     }
 
-    // Helper method to create stock transaction
+    // Helper method to create stock transaction with branch support
     static async createTransaction({
       productId,
+      branchId,
       transactionType,
       quantity,
       unitCost = null,
@@ -36,18 +37,39 @@ module.exports = (sequelize, DataTypes) => {
       transaction = null,
     }) {
       const Product = sequelize.models.Product;
+      const BranchStock = sequelize.models.BranchStock;
 
-      const product = await Product.findByPk(productId, { transaction });
-
-      if (!product) {
-        throw new Error("Product not found");
+      if (!branchId) {
+        throw new Error("Branch ID is required");
       }
 
-      const quantityBefore = product.currentStock || 0;
+      // Get or create branch stock record
+      let branchStock = await BranchStock.findOne({
+        where: { productId, branchId },
+        transaction,
+      });
+
+      if (!branchStock) {
+        // Create branch stock record if it doesn't exist
+        branchStock = await BranchStock.create(
+          {
+            productId,
+            branchId,
+            currentStock: 0,
+            minimumStock: 10,
+            reorderPoint: 20,
+          },
+          { transaction },
+        );
+      }
+
+      const quantityBefore = branchStock.currentStock || 0;
       const quantityAfter = quantityBefore + quantity;
 
       if (quantityAfter < 0) {
-        throw new Error("Insufficient stock");
+        throw new Error(
+          `Insufficient stock. Available: ${quantityBefore}, Requested: ${Math.abs(quantity)}`,
+        );
       }
 
       // Calculate total cost
@@ -57,6 +79,7 @@ module.exports = (sequelize, DataTypes) => {
       const stockRecord = await this.create(
         {
           productId,
+          branchId,
           transactionType,
           quantity,
           quantityBefore,
@@ -74,10 +97,49 @@ module.exports = (sequelize, DataTypes) => {
         { transaction },
       );
 
-      // Update product current stock
-      await product.update({ currentStock: quantityAfter }, { transaction });
+      // Update branch stock
+      await branchStock.update({ currentStock: quantityAfter }, { transaction });
 
       return stockRecord;
+    }
+
+    // Helper method to transfer stock between branches
+    static async transferBetweenBranches({
+      productId,
+      fromBranchId,
+      toBranchId,
+      quantity,
+      performedBy,
+      reason = null,
+      transaction = null,
+    }) {
+      if (quantity <= 0) {
+        throw new Error("Transfer quantity must be positive");
+      }
+
+      // Deduct from source branch
+      const deductRecord = await this.createTransaction({
+        productId,
+        branchId: fromBranchId,
+        transactionType: "ADJUSTMENT",
+        quantity: -quantity,
+        reason: reason || `Transfer to branch ${toBranchId}`,
+        performedBy,
+        transaction,
+      });
+
+      // Add to destination branch
+      const addRecord = await this.createTransaction({
+        productId,
+        branchId: toBranchId,
+        transactionType: "ADJUSTMENT",
+        quantity: quantity,
+        reason: reason || `Transfer from branch ${fromBranchId}`,
+        performedBy,
+        transaction,
+      });
+
+      return { deductRecord, addRecord };
     }
   }
 
@@ -93,7 +155,7 @@ module.exports = (sequelize, DataTypes) => {
       },
       branchId: {
         type: DataTypes.INTEGER,
-        allowNull: true,
+        allowNull: false,
         references: {
           model: "branches",
           key: "id",
@@ -108,12 +170,15 @@ module.exports = (sequelize, DataTypes) => {
           "ADJUSTMENT",
           "DAMAGE",
           "EXPIRED",
+          "TRANSFER_IN",
+          "TRANSFER_OUT",
         ),
         allowNull: false,
       },
       quantity: {
         type: DataTypes.INTEGER,
         allowNull: false,
+        comment: "Positive for additions, negative for deductions",
       },
       quantityBefore: {
         type: DataTypes.INTEGER,
@@ -146,10 +211,12 @@ module.exports = (sequelize, DataTypes) => {
       referenceId: {
         type: DataTypes.INTEGER,
         allowNull: true,
+        comment: "Reference to related transaction (e.g., sale ID, purchase order ID)",
       },
       referenceType: {
         type: DataTypes.STRING,
         allowNull: true,
+        comment: "Type of reference (e.g., SALE, PURCHASE_ORDER)",
       },
       reason: {
         type: DataTypes.TEXT,

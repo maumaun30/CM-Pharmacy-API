@@ -20,6 +20,12 @@ module.exports = (sequelize, DataTypes) => {
         foreignKey: "productId",
         as: "stockHistory",
       });
+
+      // New association with BranchStock
+      Product.hasMany(models.BranchStock, {
+        foreignKey: "productId",
+        as: "branchStocks",
+      });
     }
 
     // Helper method to calculate margin percentage
@@ -31,6 +37,23 @@ module.exports = (sequelize, DataTypes) => {
     // Helper method to get margin amount
     getMarginAmount() {
       return this.price - this.cost;
+    }
+
+    // Helper method to get total stock across all branches
+    async getTotalStock() {
+      const BranchStock = sequelize.models.BranchStock;
+      const result = await BranchStock.sum("currentStock", {
+        where: { productId: this.id },
+      });
+      return result || 0;
+    }
+
+    // Helper method to get stock for a specific branch
+    async getBranchStock(branchId) {
+      const BranchStock = sequelize.models.BranchStock;
+      return await BranchStock.findOne({
+        where: { productId: this.id, branchId },
+      });
     }
   }
 
@@ -114,42 +137,17 @@ module.exports = (sequelize, DataTypes) => {
           return price - cost;
         },
       },
-      currentStock: {
-        type: DataTypes.INTEGER,
-        allowNull: false,
-        defaultValue: 0,
-        comment: "Current stock quantity",
-      },
-      minimumStock: {
-        type: DataTypes.INTEGER,
-        allowNull: true,
-        defaultValue: 10,
-        comment: "Minimum stock level for alerts",
-      },
-      maximumStock: {
-        type: DataTypes.INTEGER,
-        allowNull: true,
-        comment: "Maximum stock level",
-      },
-      reorderPoint: {
-        type: DataTypes.INTEGER,
-        allowNull: true,
-        defaultValue: 20,
-        comment: "Reorder point",
-      },
-
-      // Add virtual field for stock status
-      stockStatus: {
+      // Virtual field for total stock across all branches
+      totalStock: {
         type: DataTypes.VIRTUAL,
         get() {
-          const current = this.getDataValue("currentStock") || 0;
-          const reorder = this.getDataValue("reorderPoint") || 20;
-          const minimum = this.getDataValue("minimumStock") || 10;
-
-          if (current === 0) return "OUT_OF_STOCK";
-          if (current <= minimum) return "CRITICAL";
-          if (current <= reorder) return "LOW";
-          return "IN_STOCK";
+          // This will be populated when we include branchStocks
+          const branchStocks = this.getDataValue("branchStocks");
+          if (!branchStocks || branchStocks.length === 0) return 0;
+          return branchStocks.reduce(
+            (sum, bs) => sum + (bs.currentStock || 0),
+            0,
+          );
         },
       },
     },

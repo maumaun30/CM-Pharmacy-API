@@ -1,8 +1,8 @@
-const { Product, Category } = require("../models");
+const { Product, Category, BranchStock, Branch } = require("../models");
 const { Op } = require("sequelize");
 const { createLog } = require("../middleware/logMiddleware");
 
-// Get all products with optional filters
+// Get all products with optional filters and branch stock info
 exports.getAllProducts = async (req, res) => {
   try {
     const {
@@ -12,7 +12,8 @@ exports.getAllProducts = async (req, res) => {
       requiresPrescription,
       search,
       inStock,
-      status, // NEW: filter by status
+      status,
+      branchId, // NEW: filter by branch
     } = req.query;
 
     const whereClause = {};
@@ -35,11 +36,6 @@ exports.getAllProducts = async (req, res) => {
       whereClause.requiresPrescription = requiresPrescription === "true";
     }
 
-    if (inStock === "true") {
-      whereClause.quantity = { [Op.gt]: 0 };
-    }
-
-    // NEW: Filter by status
     if (status) {
       whereClause.status = status;
     }
@@ -53,6 +49,24 @@ exports.getAllProducts = async (req, res) => {
       ];
     }
 
+    // Build include for branch stocks
+    const branchStockInclude = {
+      model: BranchStock,
+      as: "branchStocks",
+      include: [
+        {
+          model: Branch,
+          as: "branch",
+          attributes: ["id", "name", "code"],
+        },
+      ],
+    };
+
+    // Filter by specific branch if provided
+    if (branchId) {
+      branchStockInclude.where = { branchId };
+    }
+
     const products = await Product.findAll({
       where: whereClause,
       include: [
@@ -61,11 +75,46 @@ exports.getAllProducts = async (req, res) => {
           as: "category",
           attributes: ["id", "name"],
         },
+        branchStockInclude,
       ],
       order: [["createdAt", "DESC"]],
     });
 
-    return res.status(200).json(products);
+    // Filter by inStock if requested
+    let filteredProducts = products;
+    if (inStock === "true") {
+      filteredProducts = products.filter((p) => {
+        if (branchId) {
+          // Check stock for specific branch
+          return p.branchStocks.some((bs) => bs.currentStock > 0);
+        } else {
+          // Check total stock across all branches
+          return p.branchStocks.some((bs) => bs.currentStock > 0);
+        }
+      });
+    }
+
+    // Transform response to include stock info
+    const response = filteredProducts.map((product) => {
+      const productData = product.toJSON();
+      
+      // Calculate total stock across all branches
+      const totalStock = productData.branchStocks.reduce(
+        (sum, bs) => sum + (bs.currentStock || 0),
+        0,
+      );
+
+      return {
+        ...productData,
+        totalStock,
+        // If filtering by branch, add convenience field
+        ...(branchId && productData.branchStocks[0]
+          ? { currentStock: productData.branchStocks[0].currentStock }
+          : {}),
+      };
+    });
+
+    return res.status(200).json(response);
   } catch (error) {
     return res
       .status(500)
@@ -73,24 +122,55 @@ exports.getAllProducts = async (req, res) => {
   }
 };
 
-// Get product by ID
+// Get product by ID with branch stock information
 exports.getProductById = async (req, res) => {
   try {
+    const { branchId } = req.query;
+
+    const includeOptions = [
+      {
+        model: Category,
+        as: "category",
+        attributes: ["id", "name"],
+      },
+      {
+        model: BranchStock,
+        as: "branchStocks",
+        include: [
+          {
+            model: Branch,
+            as: "branch",
+            attributes: ["id", "name", "code"],
+          },
+        ],
+      },
+    ];
+
+    // Filter by specific branch if provided
+    if (branchId) {
+      includeOptions[1].where = { branchId };
+    }
+
     const product = await Product.findByPk(req.params.id, {
-      include: [
-        {
-          model: Category,
-          as: "category",
-          attributes: ["id", "name"],
-        },
-      ],
+      include: includeOptions,
     });
 
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    return res.status(200).json(product);
+    const productData = product.toJSON();
+    
+    // Calculate total stock
+    const totalStock = productData.branchStocks.reduce(
+      (sum, bs) => sum + (bs.currentStock || 0),
+      0,
+    );
+
+    return res.status(200).json({
+      ...productData,
+      totalStock,
+    });
   } catch (error) {
     return res
       .status(500)
@@ -98,7 +178,7 @@ exports.getProductById = async (req, res) => {
   }
 };
 
-// Create new product
+// Create new product (and optionally initialize stock for branches)
 exports.createProduct = async (req, res) => {
   try {
     const {
@@ -107,15 +187,16 @@ exports.createProduct = async (req, res) => {
       description,
       price,
       cost,
-      quantity,
       expiryDate,
       brandName,
       genericName,
       dosage,
       form,
       requiresPrescription,
-      status, // NEW
+      status,
       categoryId,
+      // New: initial stock configuration per branch
+      branchStocks, // Array of { branchId, currentStock, minimumStock, reorderPoint }
     } = req.body;
 
     // Validate required fields
@@ -146,23 +227,47 @@ exports.createProduct = async (req, res) => {
       description,
       price,
       cost,
-      quantity: quantity || 0,
       expiryDate,
       brandName,
       genericName,
       dosage,
       form,
       requiresPrescription: requiresPrescription || false,
-      status: status || "ACTIVE", // NEW
+      status: status || "ACTIVE",
       categoryId,
     });
 
-    const productWithCategory = await Product.findByPk(newProduct.id, {
+    // Initialize branch stocks if provided
+    if (branchStocks && Array.isArray(branchStocks)) {
+      for (const branchStock of branchStocks) {
+        await BranchStock.create({
+          productId: newProduct.id,
+          branchId: branchStock.branchId,
+          currentStock: branchStock.currentStock || 0,
+          minimumStock: branchStock.minimumStock || 10,
+          maximumStock: branchStock.maximumStock || null,
+          reorderPoint: branchStock.reorderPoint || 20,
+        });
+      }
+    }
+
+    const productWithDetails = await Product.findByPk(newProduct.id, {
       include: [
         {
           model: Category,
           as: "category",
           attributes: ["id", "name"],
+        },
+        {
+          model: BranchStock,
+          as: "branchStocks",
+          include: [
+            {
+              model: Branch,
+              as: "branch",
+              attributes: ["id", "name", "code"],
+            },
+          ],
         },
       ],
     });
@@ -176,7 +281,7 @@ exports.createProduct = async (req, res) => {
       { product: newProduct.toJSON() },
     );
 
-    return res.status(201).json(productWithCategory);
+    return res.status(201).json(productWithDetails);
   } catch (error) {
     return res
       .status(500)
@@ -193,26 +298,24 @@ exports.updateProduct = async (req, res) => {
       description,
       price,
       cost,
-      quantity,
       expiryDate,
       brandName,
       genericName,
       dosage,
       form,
       requiresPrescription,
-      status, // NEW
+      status,
       categoryId,
     } = req.body;
 
     const productId = req.params.id;
 
-    // Find the product
     const product = await Product.findByPk(productId);
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    // Check if updated SKU already exists (and isn't the current product)
+    // Check if updated SKU already exists
     if (sku && sku !== product.sku) {
       const existingSku = await Product.findOne({ where: { sku } });
       if (existingSku) {
@@ -237,7 +340,6 @@ exports.updateProduct = async (req, res) => {
         description !== undefined ? description : product.description,
       price: price !== undefined ? price : product.price,
       cost: cost !== undefined ? cost : product.cost,
-      quantity: quantity !== undefined ? quantity : product.quantity,
       expiryDate: expiryDate !== undefined ? expiryDate : product.expiryDate,
       brandName: brandName !== undefined ? brandName : product.brandName,
       genericName:
@@ -248,7 +350,7 @@ exports.updateProduct = async (req, res) => {
         requiresPrescription !== undefined
           ? requiresPrescription
           : product.requiresPrescription,
-      status: status || product.status, // NEW
+      status: status || product.status,
       categoryId: categoryId || product.categoryId,
     });
 
@@ -258,6 +360,17 @@ exports.updateProduct = async (req, res) => {
           model: Category,
           as: "category",
           attributes: ["id", "name"],
+        },
+        {
+          model: BranchStock,
+          as: "branchStocks",
+          include: [
+            {
+              model: Branch,
+              as: "branch",
+              attributes: ["id", "name", "code"],
+            },
+          ],
         },
       ],
     });
@@ -311,31 +424,7 @@ exports.deleteProduct = async (req, res) => {
   }
 };
 
-exports.updateStock = async (req, res) => {
-  try {
-    const { quantity } = req.body;
-
-    if (quantity == null || quantity < 0) {
-      return res.status(400).json({ message: "Invalid quantity" });
-    }
-
-    const product = await Product.findByPk(req.params.id);
-    if (!product) {
-      return res.status(404).json({ message: "Product not found" });
-    }
-
-    product.quantity = quantity;
-    await product.save();
-
-    res.json({ message: "Stock updated", quantity: product.quantity });
-  } catch (error) {
-    res
-      .status(500)
-      .json({ message: "Error updating stock", error: error.message });
-  }
-};
-
-// NEW: Toggle product status
+// Toggle product status
 exports.toggleProductStatus = async (req, res) => {
   try {
     const product = await Product.findByPk(req.params.id);
@@ -354,5 +443,141 @@ exports.toggleProductStatus = async (req, res) => {
     res
       .status(500)
       .json({ message: "Error toggling product status", error: error.message });
+  }
+};
+
+// NEW: Get product stock for a specific branch
+exports.getProductBranchStock = async (req, res) => {
+  try {
+    const { productId, branchId } = req.params;
+
+    const branchStock = await BranchStock.findOne({
+      where: { productId, branchId },
+      include: [
+        {
+          model: Product,
+          as: "product",
+          attributes: ["id", "name", "sku", "brandName"],
+        },
+        {
+          model: Branch,
+          as: "branch",
+          attributes: ["id", "name", "code"],
+        },
+      ],
+    });
+
+    if (!branchStock) {
+      return res.status(404).json({ message: "Branch stock not found" });
+    }
+
+    return res.status(200).json(branchStock);
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
+  }
+};
+
+// NEW: Update stock levels for a specific branch
+exports.updateBranchStock = async (req, res) => {
+  try {
+    const { productId, branchId } = req.params;
+    const { minimumStock, maximumStock, reorderPoint } = req.body;
+
+    let branchStock = await BranchStock.findOne({
+      where: { productId, branchId },
+    });
+
+    if (!branchStock) {
+      // Create if doesn't exist
+      branchStock = await BranchStock.create({
+        productId,
+        branchId,
+        currentStock: 0,
+        minimumStock: minimumStock || 10,
+        maximumStock: maximumStock || null,
+        reorderPoint: reorderPoint || 20,
+      });
+    } else {
+      // Update existing
+      await branchStock.update({
+        minimumStock:
+          minimumStock !== undefined ? minimumStock : branchStock.minimumStock,
+        maximumStock:
+          maximumStock !== undefined ? maximumStock : branchStock.maximumStock,
+        reorderPoint:
+          reorderPoint !== undefined ? reorderPoint : branchStock.reorderPoint,
+      });
+    }
+
+    const updated = await BranchStock.findOne({
+      where: { productId, branchId },
+      include: [
+        {
+          model: Product,
+          as: "product",
+          attributes: ["id", "name", "sku"],
+        },
+        {
+          model: Branch,
+          as: "branch",
+          attributes: ["id", "name", "code"],
+        },
+      ],
+    });
+
+    return res.status(200).json(updated);
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
+  }
+};
+
+// NEW: Get low stock products per branch
+exports.getLowStockProducts = async (req, res) => {
+  try {
+    const { branchId } = req.query;
+
+    const whereClause = {
+      [Op.or]: [
+        { currentStock: { [Op.eq]: 0 } },
+        sequelize.literal('"BranchStock"."currentStock" <= "BranchStock"."reorderPoint"'),
+      ],
+    };
+
+    if (branchId) {
+      whereClause.branchId = branchId;
+    }
+
+    const lowStockItems = await BranchStock.findAll({
+      where: whereClause,
+      include: [
+        {
+          model: Product,
+          as: "product",
+          include: [
+            {
+              model: Category,
+              as: "category",
+              attributes: ["id", "name"],
+            },
+          ],
+        },
+        {
+          model: Branch,
+          as: "branch",
+          attributes: ["id", "name", "code"],
+        },
+      ],
+      order: [["currentStock", "ASC"]],
+    });
+
+    return res.status(200).json(lowStockItems);
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
   }
 };

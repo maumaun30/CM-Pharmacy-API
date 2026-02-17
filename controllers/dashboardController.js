@@ -1,8 +1,8 @@
-const { Sale, Product, User, sequelize } = require("../models");
+const { Sale, Product, User, BranchStock, Branch, sequelize } = require("../models");
 const { Op } = require("sequelize");
 
 /**
- * Get dashboard statistics
+ * Get dashboard statistics with branch-based stock
  * GET /api/dashboard/stats
  */
 exports.getDashboardStats = async (req, res) => {
@@ -11,6 +11,8 @@ exports.getDashboardStats = async (req, res) => {
       id: req.user.id,
       role: req.user.role,
       username: req.user.username,
+      branchId: req.user.branchId,
+      currentBranchId: req.user.currentBranchId,
     });
 
     const userId = req.user.id;
@@ -20,11 +22,18 @@ exports.getDashboardStats = async (req, res) => {
 
     // Determine which branch to filter by
     let branchFilter = {};
+    let activeBranchId = null;
+    
     if (userRole === "admin" && currentBranchId) {
+      // Admin viewing specific branch
       branchFilter = { branchId: currentBranchId };
+      activeBranchId = currentBranchId;
     } else if (userRole !== "admin") {
+      // Non-admin users see only their branch
       branchFilter = { branchId: userBranchId };
+      activeBranchId = userBranchId;
     }
+    // If admin without currentBranchId, show all branches (no filter)
 
     // Get today's date range (start and end of day)
     const today = new Date();
@@ -51,15 +60,119 @@ exports.getDashboardStats = async (req, res) => {
     const todaySales = parseFloat(todaySalesData?.totalSales || 0);
     const todayTransactions = parseInt(todaySalesData?.transactionCount || 0);
 
-    // 2. Low Stock Count
-    const lowStockCount = await Product.count({
-      where: {
-        currentStock: {
-          [Op.lte]: sequelize.col("reorderPoint"),
+    // 2. Low Stock Count (branch-based)
+    let lowStockCount = 0;
+    let outOfStockCount = 0;
+    let criticalStockCount = 0;
+    
+    if (activeBranchId) {
+      // Specific branch stock counts
+      lowStockCount = await BranchStock.count({
+        where: {
+          branchId: activeBranchId,
+          currentStock: {
+            [Op.lte]: sequelize.col("BranchStock.reorderPoint"),
+          },
         },
-        status: "ACTIVE",
-      },
-    });
+        include: [
+          {
+            model: Product,
+            as: "product",
+            where: { status: "ACTIVE" },
+            attributes: [],
+          },
+        ],
+      });
+
+      outOfStockCount = await BranchStock.count({
+        where: {
+          branchId: activeBranchId,
+          currentStock: 0,
+        },
+        include: [
+          {
+            model: Product,
+            as: "product",
+            where: { status: "ACTIVE" },
+            attributes: [],
+          },
+        ],
+      });
+
+      criticalStockCount = await BranchStock.count({
+        where: {
+          branchId: activeBranchId,
+          currentStock: {
+            [Op.gt]: 0,
+            [Op.lte]: sequelize.col("BranchStock.minimumStock"),
+          },
+        },
+        include: [
+          {
+            model: Product,
+            as: "product",
+            where: { status: "ACTIVE" },
+            attributes: [],
+          },
+        ],
+      });
+    } else {
+      // All branches - count unique products with low stock in any branch
+      const lowStockProducts = await BranchStock.findAll({
+        attributes: [
+          "productId",
+          [sequelize.fn("SUM", sequelize.col("currentStock")), "totalStock"],
+          [sequelize.fn("AVG", sequelize.col("reorderPoint")), "avgReorderPoint"],
+        ],
+        where: sequelize.literal(
+          '"BranchStock"."currentStock" <= "BranchStock"."reorderPoint"'
+        ),
+        include: [
+          {
+            model: Product,
+            as: "product",
+            where: { status: "ACTIVE" },
+            attributes: [],
+          },
+        ],
+        group: ["productId"],
+        raw: true,
+      });
+      lowStockCount = lowStockProducts.length;
+
+      outOfStockCount = await BranchStock.count({
+        where: { currentStock: 0 },
+        include: [
+          {
+            model: Product,
+            as: "product",
+            where: { status: "ACTIVE" },
+            attributes: [],
+          },
+        ],
+      });
+
+      const criticalProducts = await BranchStock.findAll({
+        attributes: ["productId"],
+        where: {
+          currentStock: {
+            [Op.gt]: 0,
+            [Op.lte]: sequelize.col("BranchStock.minimumStock"),
+          },
+        },
+        include: [
+          {
+            model: Product,
+            as: "product",
+            where: { status: "ACTIVE" },
+            attributes: [],
+          },
+        ],
+        group: ["productId"],
+        raw: true,
+      });
+      criticalStockCount = criticalProducts.length;
+    }
 
     // 3. Total Products Count
     const totalProducts = await Product.count({
@@ -76,7 +189,7 @@ exports.getDashboardStats = async (req, res) => {
           model: User,
           as: "seller",
           attributes: ["id", "username", "firstName", "lastName"],
-          required: false, // ✅ LEFT JOIN instead of INNER JOIN
+          required: false,
         },
       ],
       order: [["soldAt", "DESC"]],
@@ -97,25 +210,13 @@ exports.getDashboardStats = async (req, res) => {
       },
     }));
 
-    // 5. Additional stats
-    const outOfStockCount = await Product.count({
-      where: {
-        currentStock: 0,
-        status: "ACTIVE",
-      },
+    console.log("✅ Dashboard stats successfully fetched", {
+      todaySales,
+      todayTransactions,
+      lowStockCount,
+      totalProducts,
+      activeBranchId,
     });
-
-    const criticalStockCount = await Product.count({
-      where: {
-        currentStock: {
-          [Op.gt]: 0,
-          [Op.lte]: sequelize.col("minimumStock"),
-        },
-        status: "ACTIVE",
-      },
-    });
-
-    console.log("✅ Dashboard stats successfully fetched");
 
     // Return dashboard stats
     res.json({
@@ -126,6 +227,7 @@ exports.getDashboardStats = async (req, res) => {
       recentSales: formattedRecentSales,
       outOfStockCount,
       criticalStockCount,
+      branchId: activeBranchId,
     });
   } catch (error) {
     console.error("❌ Dashboard stats error:", error);
@@ -212,10 +314,10 @@ exports.getTopProducts = async (req, res) => {
     const replacements = { limit };
 
     if (userRole === "admin" && currentBranchId) {
-      branchCondition = "AND s.branchId = :branchId";
+      branchCondition = 'AND s."branchId" = :branchId';
       replacements.branchId = currentBranchId;
     } else if (userRole !== "admin") {
-      branchCondition = "AND s.branchId = :branchId";
+      branchCondition = 'AND s."branchId" = :branchId';
       replacements.branchId = userBranchId;
     }
 
@@ -231,16 +333,16 @@ exports.getTopProducts = async (req, res) => {
         p.name,
         p.sku,
         p.price,
-        SUM(si.quantity) as totalQuantitySold,
-        SUM(si.quantity * si.price) as totalRevenue,
-        COUNT(DISTINCT si.saleId) as numberOfSales
+        SUM(si.quantity) as "totalQuantitySold",
+        SUM(si.quantity * si.price) as "totalRevenue",
+        COUNT(DISTINCT si."saleId") as "numberOfSales"
       FROM products p
-      INNER JOIN sale_items si ON p.id = si.productId
-      INNER JOIN sales s ON si.saleId = s.id
-      WHERE s.soldAt >= :thirtyDaysAgo
+      INNER JOIN sale_items si ON p.id = si."productId"
+      INNER JOIN sales s ON si."saleId" = s.id
+      WHERE s."soldAt" >= :thirtyDaysAgo
         ${branchCondition}
       GROUP BY p.id, p.name, p.sku, p.price
-      ORDER BY totalQuantitySold DESC
+      ORDER BY "totalQuantitySold" DESC
       LIMIT :limit
     `,
       {
@@ -264,6 +366,80 @@ exports.getTopProducts = async (req, res) => {
     console.error("Top products error:", error);
     res.status(500).json({
       message: "Error fetching top products",
+      error: error.message,
+    });
+  }
+};
+
+/**
+ * Get branch-specific stock alerts
+ * GET /api/dashboard/stock-alerts
+ */
+exports.getStockAlerts = async (req, res) => {
+  try {
+    const userRole = req.user.role;
+    const userBranchId = req.user.branchId;
+    const currentBranchId = req.user.currentBranchId;
+
+    let branchFilter = {};
+    if (userRole === "admin" && currentBranchId) {
+      branchFilter = { branchId: currentBranchId };
+    } else if (userRole !== "admin") {
+      branchFilter = { branchId: userBranchId };
+    }
+
+    const alerts = await BranchStock.findAll({
+      where: {
+        ...branchFilter,
+        [Op.or]: [
+          { currentStock: 0 },
+          sequelize.literal(
+            '"BranchStock"."currentStock" <= "BranchStock"."reorderPoint"'
+          ),
+        ],
+      },
+      include: [
+        {
+          model: Product,
+          as: "product",
+          where: { status: "ACTIVE" },
+          attributes: ["id", "name", "sku", "brandName"],
+        },
+        {
+          model: Branch,
+          as: "branch",
+          attributes: ["id", "name", "code"],
+        },
+      ],
+      order: [
+        ["currentStock", "ASC"],
+        ["branchId", "ASC"],
+      ],
+      limit: 20,
+    });
+
+    const formattedAlerts = alerts.map((alert) => ({
+      id: alert.id,
+      productId: alert.productId,
+      branchId: alert.branchId,
+      currentStock: alert.currentStock,
+      minimumStock: alert.minimumStock,
+      reorderPoint: alert.reorderPoint,
+      status: alert.stockStatus,
+      product: {
+        id: alert.product.id,
+        name: alert.product.name,
+        sku: alert.product.sku,
+        brandName: alert.product.brandName,
+      },
+      branch: alert.branch,
+    }));
+
+    res.json(formattedAlerts);
+  } catch (error) {
+    console.error("Stock alerts error:", error);
+    res.status(500).json({
+      message: "Error fetching stock alerts",
       error: error.message,
     });
   }
