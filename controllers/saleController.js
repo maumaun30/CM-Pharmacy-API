@@ -7,9 +7,14 @@ const {
   Category,
   Stock,
   Branch,
+  BranchStock,
 } = require("../models");
 const { createLog } = require("../middleware/logMiddleware");
-const { emitNewSale, emitDashboardRefresh, emitStockUpdate } = require("../utils/socket");
+const {
+  emitNewSale,
+  emitDashboardRefresh,
+  emitStockUpdate,
+} = require("../utils/socket");
 
 exports.createSale = async (req, res) => {
   try {
@@ -41,7 +46,6 @@ exports.createSale = async (req, res) => {
 
     // Validate cart items structure
     for (const item of cart) {
-      // Check for both old format (item.product.id) and new format (item.productId)
       const productId = item.productId || item.product?.id;
       const quantity = item.quantity;
 
@@ -53,10 +57,20 @@ exports.createSale = async (req, res) => {
       }
     }
 
-    // Extract product IDs (handle both formats)
+    // Extract product IDs
     const productIds = cart.map((item) => item.productId || item.product.id);
+
+    // Get products with their branch stock
     const products = await Product.findAll({
       where: { id: productIds },
+      include: [
+        {
+          model: BranchStock,
+          as: "branchStocks",
+          where: { branchId: activeBranchId },
+          required: true,
+        },
+      ],
     });
 
     // Create a map for quick lookup
@@ -76,9 +90,18 @@ exports.createSale = async (req, res) => {
         });
       }
 
-      if (item.quantity > product.quantity) {
+      // Get branch stock for validation
+      const branchStock = product.branchStocks[0];
+      if (!branchStock) {
+        return res.status(404).json({
+          message: `Product "${product.name}" not available at this branch`,
+        });
+      }
+
+      // Check stock availability at this branch
+      if (item.quantity > branchStock.currentStock) {
         return res.status(400).json({
-          message: `Insufficient stock for ${product.name}. Available: ${product.quantity}, Requested: ${item.quantity}`,
+          message: `Insufficient stock for ${product.name} at this branch. Available: ${branchStock.currentStock}, Requested: ${item.quantity}`,
         });
       }
 
@@ -136,10 +159,11 @@ exports.createSale = async (req, res) => {
         { transaction: t },
       );
 
-      // Create sale items and update stock
+      // Create sale items and update branch stock
       for (const item of cart) {
         const productId = item.productId || item.product.id;
         const product = productMap.get(productId);
+        const branchStock = product.branchStocks[0];
 
         // Determine final price (discounted or regular)
         const finalPrice = item.discountedPrice
@@ -165,20 +189,36 @@ exports.createSale = async (req, res) => {
           { transaction: t },
         );
 
-        // Update stock
-        await Stock.createTransaction({
-          productId: product.id,
-          transactionType: "SALE",
-          quantity: -item.quantity,
-          referenceId: sale.id,
-          referenceType: "sale",
-          performedBy: req.user.id,
-          branchId: activeBranchId,
-          transaction: t,
-        });
+        // Update branch stock
+        const newStockLevel = branchStock.currentStock - item.quantity;
+        await BranchStock.update(
+          { currentStock: newStockLevel },
+          {
+            where: {
+              productId: product.id,
+              branchId: activeBranchId,
+            },
+            transaction: t,
+          },
+        );
 
-        // ✨ REAL-TIME: Calculate new stock level for this product
-        const newStockLevel = product.quantity - item.quantity;
+        // Create stock transaction record
+        await Stock.create(
+          {
+            productId: product.id,
+            branchId: activeBranchId,
+            transactionType: "SALE",
+            quantity: -item.quantity,
+            quantityBefore: branchStock.currentStock,
+            quantityAfter: newStockLevel,
+            referenceId: sale.id,
+            referenceType: "sale",
+            performedBy: req.user.id,
+          },
+          { transaction: t },
+        );
+
+        // ✨ REAL-TIME: Track stock update for socket emission
         stockUpdates.push({
           productId: product.id,
           newStock: newStockLevel,
@@ -199,6 +239,7 @@ exports.createSale = async (req, res) => {
         items: cart.length,
         total: result.totalAmount,
         discount: totalDiscount,
+        branch: activeBranchId,
       },
     );
 
@@ -233,8 +274,10 @@ exports.createSale = async (req, res) => {
         productId: stockUpdate.productId,
         newStock: stockUpdate.newStock,
       });
-      
-      console.log(`📦 Stock update emitted: Product ${stockUpdate.productId} -> ${stockUpdate.newStock} units (Branch ${stockUpdate.branchId})`);
+
+      console.log(
+        `📦 Stock update emitted: Product ${stockUpdate.productId} -> ${stockUpdate.newStock} units (Branch ${stockUpdate.branchId})`,
+      );
     }
 
     // ✨ REAL-TIME: Trigger dashboard refresh for all connected clients
@@ -277,12 +320,15 @@ exports.getSales = async (req, res) => {
 
     const whereClause = {};
 
+    // Admin viewing all branches
     if (user.role !== "admin") {
       whereClause.branchId = activeBranchId;
     } else {
+      // Admin viewing specific branch
       if (user.currentBranchId) {
         whereClause.branchId = user.currentBranchId;
       }
+      // Otherwise, admin sees all branches (no filter)
     }
 
     const sales = await Sale.findAll({
@@ -340,7 +386,10 @@ exports.getSales = async (req, res) => {
       seller: sale.seller
         ? {
             id: sale.seller.id,
-            name: sale.seller.fullName,
+            name:
+              sale.seller.firstName && sale.seller.lastName
+                ? `${sale.seller.firstName} ${sale.seller.lastName}`.trim()
+                : sale.seller.username || "Unknown",
             email: sale.seller.email,
           }
         : null,

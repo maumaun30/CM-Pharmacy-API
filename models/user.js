@@ -101,6 +101,14 @@ module.exports = (sequelize, DataTypes) => {
     {
       sequelize,
       modelName: "User",
+      getterMethods: {
+        fullName() {
+          if (this.firstName && this.lastName) {
+            return `${this.firstName} ${this.lastName}`.trim();
+          }
+          return this.username;
+        },
+      },
       tableName: "users",
       timestamps: true,
       hooks: {

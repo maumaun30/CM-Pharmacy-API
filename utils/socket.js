@@ -16,13 +16,13 @@ const initializeSocket = (server) => {
   });
 
   io.on("connection", (socket) => {
-    console.log(`Client connected: ${socket.id}`);
+    console.log(`✅ Client connected: ${socket.id}`);
 
     // Join room based on branch (for branch-specific updates)
     socket.on("join-branch", (branchId) => {
       if (branchId) {
         socket.join(`branch-${branchId}`);
-        console.log(`Socket ${socket.id} joined branch-${branchId}`);
+        console.log(`🏢 Socket ${socket.id} joined branch-${branchId}`);
       }
       // Admin room for all-branches view
       socket.join("admin-all");
@@ -32,12 +32,12 @@ const initializeSocket = (server) => {
     socket.on("leave-branch", (branchId) => {
       if (branchId) {
         socket.leave(`branch-${branchId}`);
-        console.log(`Socket ${socket.id} left branch-${branchId}`);
+        console.log(`👋 Socket ${socket.id} left branch-${branchId}`);
       }
     });
 
     socket.on("disconnect", () => {
-      console.log(`Client disconnected: ${socket.id}`);
+      console.log(`❌ Client disconnected: ${socket.id}`);
     });
   });
 
@@ -61,15 +61,15 @@ const emitNewSale = (saleData) => {
   try {
     const io = getIO();
     
-    // Emit to specific branch
+    // ✅ FIXED: Use "new-sale" to match frontend listener
     if (saleData.branchId) {
-      io.to(`branch-${saleData.branchId}`).emit("sale:new", saleData);
+      io.to(`branch-${saleData.branchId}`).emit("new-sale", saleData);
+      console.log(`🛒 Emitted new-sale to branch-${saleData.branchId}:`, saleData.id);
     }
     
     // Emit to admin viewing all branches
-    io.to("admin-all").emit("sale:new", saleData);
+    io.to("admin-all").emit("new-sale", saleData);
     
-    console.log(`Emitted sale:new event for sale #${saleData.id}`);
   } catch (error) {
     console.error("Error emitting sale event:", error);
   }
@@ -77,20 +77,27 @@ const emitNewSale = (saleData) => {
 
 /**
  * Emit stock update event
+ * @param {number} branchId - Branch ID where stock changed
+ * @param {object} data - Stock data {productId, newStock}
  */
-const emitStockUpdate = (stockData) => {
+const emitStockUpdate = (branchId, data) => {
   try {
     const io = getIO();
     
+    // ✅ FIXED: Use "stock-updated" to match frontend listener
+    const payload = {
+      productId: data.productId,
+      newStock: data.newStock,
+      branchId: branchId,
+    };
+    
     // Emit to specific branch
-    if (stockData.branchId) {
-      io.to(`branch-${stockData.branchId}`).emit("stock:update", stockData);
-    }
+    io.to(`branch-${branchId}`).emit("stock-updated", payload);
+    console.log(`📦 Emitted stock-updated to branch-${branchId}:`, payload);
     
     // Emit to admin viewing all branches
-    io.to("admin-all").emit("stock:update", stockData);
+    io.to("admin-all").emit("stock-updated", payload);
     
-    console.log(`Emitted stock:update event for product #${stockData.productId}`);
   } catch (error) {
     console.error("Error emitting stock event:", error);
   }
@@ -98,15 +105,22 @@ const emitStockUpdate = (stockData) => {
 
 /**
  * Emit low stock alert
+ * @param {number} branchId - Branch ID where low stock detected
+ * @param {object} productData - Product data
  */
-const emitLowStockAlert = (productData) => {
+const emitLowStockAlert = (branchId, productData) => {
   try {
     const io = getIO();
     
-    // Emit to all connected clients (low stock is critical)
-    io.emit("stock:low-alert", productData);
+    // Emit to specific branch
+    if (branchId) {
+      io.to(`branch-${branchId}`).emit("low-stock-alert", productData);
+      console.log(`⚠️ Emitted low-stock-alert to branch-${branchId}:`, productData.id);
+    }
     
-    console.log(`Emitted low stock alert for product #${productData.id}`);
+    // Emit to admin viewing all branches
+    io.to("admin-all").emit("low-stock-alert", productData);
+    
   } catch (error) {
     console.error("Error emitting low stock alert:", error);
   }
@@ -114,18 +128,20 @@ const emitLowStockAlert = (productData) => {
 
 /**
  * Emit dashboard refresh request
+ * @param {number} branchId - Branch ID to refresh (optional)
  */
 const emitDashboardRefresh = (branchId = null) => {
   try {
     const io = getIO();
     
     if (branchId) {
-      io.to(`branch-${branchId}`).emit("dashboard:refresh");
+      io.to(`branch-${branchId}`).emit("dashboard-refresh");
+      console.log(`📊 Emitted dashboard-refresh to branch-${branchId}`);
     } else {
-      io.emit("dashboard:refresh");
+      io.emit("dashboard-refresh");
+      console.log(`📊 Emitted dashboard-refresh to all`);
     }
     
-    console.log(`Emitted dashboard refresh${branchId ? ` for branch ${branchId}` : ""}`);
   } catch (error) {
     console.error("Error emitting dashboard refresh:", error);
   }

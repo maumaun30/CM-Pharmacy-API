@@ -1,5 +1,5 @@
 // controllers/stockController.js
-const { Stock, Product, User, Branch } = require("../models");
+const { Stock, Product, User, Branch, BranchStock, sequelize } = require("../models");
 const { Op } = require("sequelize");
 const { createLog } = require("../middleware/logMiddleware");
 const { emitStockUpdate, emitLowStockAlert, emitDashboardRefresh } = require("../utils/socket");
@@ -32,9 +32,7 @@ exports.getProductStockHistory = async (req, res) => {
     const { productId } = req.params;
     const { page = 1, limit = 50 } = req.query;
 
-    const { activeBranchId, canViewAllBranches } = await getUserActiveBranch(
-      req.user.id,
-    );
+    const { activeBranchId, canViewAllBranches } = await getUserActiveBranch(req.user.id);
 
     const whereClause = { productId };
 
@@ -56,7 +54,7 @@ exports.getProductStockHistory = async (req, res) => {
         {
           model: User,
           as: "user",
-          attributes: ["id", "username"],
+          attributes: ["id", "username", "firstName", "lastName"],
         },
         {
           model: Branch,
@@ -99,9 +97,7 @@ exports.getAllStockTransactions = async (req, res) => {
       limit = 50,
     } = req.query;
 
-    const { activeBranchId, canViewAllBranches } = await getUserActiveBranch(
-      req.user.id,
-    );
+    const { activeBranchId, canViewAllBranches } = await getUserActiveBranch(req.user.id);
 
     const whereClause = {};
 
@@ -150,7 +146,7 @@ exports.getAllStockTransactions = async (req, res) => {
         {
           model: User,
           as: "user",
-          attributes: ["id", "username", "firstName", "lastName", "fullName"],
+          attributes: ["id", "username", "firstName", "lastName"],
         },
         {
           model: Branch,
@@ -208,16 +204,37 @@ exports.addStock = async (req, res) => {
       });
     }
 
-    const stock = await Stock.createTransaction({
+    // ✅ GET BRANCH STOCK (not product stock)
+    const branchStock = await BranchStock.findOne({
+      where: { productId, branchId: activeBranchId },
+    });
+
+    if (!branchStock) {
+      return res.status(404).json({
+        message: "Product not found in this branch inventory",
+      });
+    }
+
+    const quantityBefore = branchStock.currentStock;
+    const quantityAfter = quantityBefore + Math.abs(quantity);
+
+    // ✅ UPDATE BRANCH STOCK
+    await branchStock.update({ currentStock: quantityAfter });
+
+    // ✅ CREATE STOCK TRANSACTION with before/after
+    const stock = await Stock.create({
       productId,
+      branchId: activeBranchId,
       transactionType,
       quantity: Math.abs(quantity),
-      unitCost,
-      batchNumber,
-      expiryDate,
-      supplier,
+      quantityBefore,
+      quantityAfter,
+      unitCost: unitCost ? parseFloat(unitCost) : null,
+      totalCost: unitCost ? parseFloat(unitCost) * Math.abs(quantity) : null,
+      batchNumber: batchNumber || null,
+      expiryDate: expiryDate ? new Date(expiryDate) : null,
+      supplier: supplier || null,
       performedBy: req.user.id,
-      branchId: activeBranchId,
     });
 
     await createLog(
@@ -229,12 +246,12 @@ exports.addStock = async (req, res) => {
       { stock: stock.toJSON() },
     );
 
-    const stockWithProduct = await Stock.findByPk(stock.id, {
+    const stockWithDetails = await Stock.findByPk(stock.id, {
       include: [
         {
           model: Product,
           as: "product",
-          attributes: ["id", "name", "sku", "currentStock", "reorderPoint", "minimumStock"],
+          attributes: ["id", "name", "sku"],
         },
         {
           model: Branch,
@@ -244,34 +261,28 @@ exports.addStock = async (req, res) => {
       ],
     });
 
-    // ✨ REAL-TIME: Emit stock update event
-    emitStockUpdate({
-      productId: stockWithProduct.product.id,
-      productName: stockWithProduct.product.name,
-      sku: stockWithProduct.product.sku,
-      currentStock: stockWithProduct.product.currentStock,
-      transactionType: stockWithProduct.transactionType,
-      quantity: stockWithProduct.quantity,
-      branchId: stockWithProduct.branchId,
+    // ✅ EMIT SOCKET EVENTS with branch context
+    emitStockUpdate(activeBranchId, {
+      productId,
+      newStock: quantityAfter,
     });
 
-    // ✨ REAL-TIME: Check if stock is low and emit alert
-    const product = stockWithProduct.product;
-    if (product.currentStock <= product.reorderPoint) {
-      emitLowStockAlert({
-        id: product.id,
-        name: product.name,
-        sku: product.sku,
-        currentStock: product.currentStock,
-        reorderPoint: product.reorderPoint,
-        minimumStock: product.minimumStock,
+    // Check if low stock
+    if (quantityAfter <= branchStock.reorderPoint) {
+      emitLowStockAlert(activeBranchId, {
+        id: productId,
+        name: stockWithDetails.product.name,
+        sku: stockWithDetails.product.sku,
+        currentStock: quantityAfter,
+        reorderPoint: branchStock.reorderPoint,
+        minimumStock: branchStock.minimumStock,
+        branchId: activeBranchId,
       });
     }
 
-    // ✨ REAL-TIME: Trigger dashboard refresh
     emitDashboardRefresh(activeBranchId);
 
-    return res.status(201).json(stockWithProduct);
+    return res.status(201).json(stockWithDetails);
   } catch (error) {
     console.error("Error adding stock:", error);
     return res.status(500).json({
@@ -300,13 +311,33 @@ exports.adjustStock = async (req, res) => {
       });
     }
 
-    const stock = await Stock.createTransaction({
+    // Get branch stock
+    const branchStock = await BranchStock.findOne({
+      where: { productId, branchId: activeBranchId },
+    });
+
+    if (!branchStock) {
+      return res.status(404).json({
+        message: "Product not found in this branch inventory",
+      });
+    }
+
+    const quantityBefore = branchStock.currentStock;
+    const quantityAfter = Math.max(0, quantityBefore + parseInt(quantity));
+
+    // Update branch stock
+    await branchStock.update({ currentStock: quantityAfter });
+
+    // Create transaction
+    const stock = await Stock.create({
       productId,
+      branchId: activeBranchId,
       transactionType: "ADJUSTMENT",
       quantity: parseInt(quantity),
-      reason,
+      quantityBefore,
+      quantityAfter,
+      reason: reason || null,
       performedBy: req.user.id,
-      branchId: activeBranchId,
     });
 
     await createLog(
@@ -318,12 +349,12 @@ exports.adjustStock = async (req, res) => {
       { stock: stock.toJSON(), reason },
     );
 
-    const stockWithProduct = await Stock.findByPk(stock.id, {
+    const stockWithDetails = await Stock.findByPk(stock.id, {
       include: [
         {
           model: Product,
           as: "product",
-          attributes: ["id", "name", "sku", "currentStock", "reorderPoint", "minimumStock"],
+          attributes: ["id", "name", "sku"],
         },
         {
           model: Branch,
@@ -333,34 +364,27 @@ exports.adjustStock = async (req, res) => {
       ],
     });
 
-    // ✨ REAL-TIME: Emit stock update event
-    emitStockUpdate({
-      productId: stockWithProduct.product.id,
-      productName: stockWithProduct.product.name,
-      sku: stockWithProduct.product.sku,
-      currentStock: stockWithProduct.product.currentStock,
-      transactionType: stockWithProduct.transactionType,
-      quantity: stockWithProduct.quantity,
-      branchId: stockWithProduct.branchId,
+    // Socket emissions
+    emitStockUpdate(activeBranchId, {
+      productId,
+      newStock: quantityAfter,
     });
 
-    // ✨ REAL-TIME: Check if stock is now low and emit alert
-    const product = stockWithProduct.product;
-    if (product.currentStock <= product.reorderPoint) {
-      emitLowStockAlert({
-        id: product.id,
-        name: product.name,
-        sku: product.sku,
-        currentStock: product.currentStock,
-        reorderPoint: product.reorderPoint,
-        minimumStock: product.minimumStock,
+    if (quantityAfter <= branchStock.reorderPoint) {
+      emitLowStockAlert(activeBranchId, {
+        id: productId,
+        name: stockWithDetails.product.name,
+        sku: stockWithDetails.product.sku,
+        currentStock: quantityAfter,
+        reorderPoint: branchStock.reorderPoint,
+        minimumStock: branchStock.minimumStock,
+        branchId: activeBranchId,
       });
     }
 
-    // ✨ REAL-TIME: Trigger dashboard refresh
     emitDashboardRefresh(activeBranchId);
 
-    return res.status(201).json(stockWithProduct);
+    return res.status(201).json(stockWithDetails);
   } catch (error) {
     console.error("Error adjusting stock:", error);
     return res.status(500).json({
@@ -373,8 +397,7 @@ exports.adjustStock = async (req, res) => {
 // Record damaged/expired stock
 exports.recordStockLoss = async (req, res) => {
   try {
-    const { productId, quantity, transactionType, reason, batchNumber } =
-      req.body;
+    const { productId, quantity, transactionType, reason, batchNumber } = req.body;
 
     if (!productId || !quantity || quantity <= 0) {
       return res.status(400).json({
@@ -396,14 +419,34 @@ exports.recordStockLoss = async (req, res) => {
       });
     }
 
-    const stock = await Stock.createTransaction({
+    // Get branch stock
+    const branchStock = await BranchStock.findOne({
+      where: { productId, branchId: activeBranchId },
+    });
+
+    if (!branchStock) {
+      return res.status(404).json({
+        message: "Product not found in this branch inventory",
+      });
+    }
+
+    const quantityBefore = branchStock.currentStock;
+    const quantityAfter = Math.max(0, quantityBefore - Math.abs(quantity));
+
+    // Update branch stock
+    await branchStock.update({ currentStock: quantityAfter });
+
+    // Create transaction (negative quantity)
+    const stock = await Stock.create({
       productId,
+      branchId: activeBranchId,
       transactionType,
       quantity: -Math.abs(quantity),
-      reason,
-      batchNumber,
+      quantityBefore,
+      quantityAfter,
+      reason: reason || null,
+      batchNumber: batchNumber || null,
       performedBy: req.user.id,
-      branchId: activeBranchId,
     });
 
     await createLog(
@@ -415,12 +458,12 @@ exports.recordStockLoss = async (req, res) => {
       { stock: stock.toJSON(), reason },
     );
 
-    const stockWithProduct = await Stock.findByPk(stock.id, {
+    const stockWithDetails = await Stock.findByPk(stock.id, {
       include: [
         {
           model: Product,
           as: "product",
-          attributes: ["id", "name", "sku", "currentStock", "reorderPoint", "minimumStock"],
+          attributes: ["id", "name", "sku"],
         },
         {
           model: Branch,
@@ -430,34 +473,27 @@ exports.recordStockLoss = async (req, res) => {
       ],
     });
 
-    // ✨ REAL-TIME: Emit stock update event
-    emitStockUpdate({
-      productId: stockWithProduct.product.id,
-      productName: stockWithProduct.product.name,
-      sku: stockWithProduct.product.sku,
-      currentStock: stockWithProduct.product.currentStock,
-      transactionType: stockWithProduct.transactionType,
-      quantity: stockWithProduct.quantity,
-      branchId: stockWithProduct.branchId,
+    // Socket emissions
+    emitStockUpdate(activeBranchId, {
+      productId,
+      newStock: quantityAfter,
     });
 
-    // ✨ REAL-TIME: Check if stock is now low and emit alert
-    const product = stockWithProduct.product;
-    if (product.currentStock <= product.reorderPoint) {
-      emitLowStockAlert({
-        id: product.id,
-        name: product.name,
-        sku: product.sku,
-        currentStock: product.currentStock,
-        reorderPoint: product.reorderPoint,
-        minimumStock: product.minimumStock,
+    if (quantityAfter <= branchStock.reorderPoint) {
+      emitLowStockAlert(activeBranchId, {
+        id: productId,
+        name: stockWithDetails.product.name,
+        sku: stockWithDetails.product.sku,
+        currentStock: quantityAfter,
+        reorderPoint: branchStock.reorderPoint,
+        minimumStock: branchStock.minimumStock,
+        branchId: activeBranchId,
       });
     }
 
-    // ✨ REAL-TIME: Trigger dashboard refresh
     emitDashboardRefresh(activeBranchId);
 
-    return res.status(201).json(stockWithProduct);
+    return res.status(201).json(stockWithDetails);
   } catch (error) {
     console.error("Error recording stock loss:", error);
     return res.status(500).json({
@@ -470,50 +506,54 @@ exports.recordStockLoss = async (req, res) => {
 // Get low stock products
 exports.getLowStockProducts = async (req, res) => {
   try {
-    const { activeBranchId, canViewAllBranches } = await getUserActiveBranch(
-      req.user.id,
-    );
+    const { activeBranchId, canViewAllBranches } = await getUserActiveBranch(req.user.id);
 
-    // Get all active products
-    const products = await Product.findAll({
-      where: {
-        status: "ACTIVE",
-      },
-      attributes: [
-        "id",
-        "name",
-        "sku",
-        "currentStock",
-        "minimumStock",
-        "reorderPoint",
-        "price",
+    const whereClause = {
+      [Op.or]: [
+        { currentStock: 0 },
+        sequelize.literal('"BranchStock"."currentStock" <= "BranchStock"."reorderPoint"'),
+      ],
+    };
+
+    // Filter by branch if not viewing all
+    if (!canViewAllBranches && activeBranchId) {
+      whereClause.branchId = activeBranchId;
+    }
+
+    // ✅ QUERY BRANCH_STOCKS TABLE
+    const lowStockItems = await BranchStock.findAll({
+      where: whereClause,
+      include: [
+        {
+          model: Product,
+          as: "product",
+          where: { status: "ACTIVE" },
+          attributes: ["id", "name", "sku", "price"],
+        },
+        {
+          model: Branch,
+          as: "branch",
+          attributes: ["id", "name", "code"],
+        },
       ],
       order: [["currentStock", "ASC"]],
     });
 
-    // Filter in JavaScript for low stock
-    const lowStockProducts = products.filter(
-      (p) => p.currentStock <= (p.reorderPoint || 20),
-    );
+    // Format response
+    const formatted = lowStockItems.map((item) => ({
+      id: item.product.id,
+      name: item.product.name,
+      sku: item.product.sku,
+      currentStock: item.currentStock,
+      minimumStock: item.minimumStock,
+      reorderPoint: item.reorderPoint,
+      price: parseFloat(item.product.price),
+      branchId: item.branchId,
+      branchName: item.branch?.name,
+      branchCode: item.branch?.code,
+    }));
 
-    // If not viewing all branches, filter by stock transactions in current branch
-    if (!canViewAllBranches && activeBranchId) {
-      // Get product IDs that have stock in this branch
-      const branchStocks = await Stock.findAll({
-        where: { branchId: activeBranchId },
-        attributes: ["productId"],
-        group: ["productId"],
-      });
-
-      const branchProductIds = branchStocks.map((s) => s.productId);
-
-      // Filter products to only those in this branch
-      return res
-        .status(200)
-        .json(lowStockProducts.filter((p) => branchProductIds.includes(p.id)));
-    }
-
-    return res.status(200).json(lowStockProducts);
+    return res.status(200).json(formatted);
   } catch (error) {
     console.error("Error fetching low stock products:", error);
     return res.status(500).json({
@@ -526,54 +566,51 @@ exports.getLowStockProducts = async (req, res) => {
 // Get stock summary/statistics
 exports.getStockSummary = async (req, res) => {
   try {
-    const { activeBranchId, canViewAllBranches } = await getUserActiveBranch(
-      req.user.id,
-    );
+    const { activeBranchId, canViewAllBranches } = await getUserActiveBranch(req.user.id);
 
-    const products = await Product.findAll({
-      where: { status: "ACTIVE" },
-      attributes: ["id", "currentStock", "minimumStock", "reorderPoint"],
-    });
+    const whereClause = {};
 
-    // If not viewing all branches, filter by branch
-    let filteredProducts = products;
+    // Filter by branch if not viewing all
     if (!canViewAllBranches && activeBranchId) {
-      const branchStocks = await Stock.findAll({
-        where: { branchId: activeBranchId },
-        attributes: ["productId"],
-        group: ["productId"],
-      });
-
-      const branchProductIds = branchStocks.map((s) => s.productId);
-      filteredProducts = products.filter((p) =>
-        branchProductIds.includes(p.id),
-      );
+      whereClause.branchId = activeBranchId;
     }
 
-    const totalProducts = filteredProducts.length;
-    const outOfStock = filteredProducts.filter(
-      (p) => p.currentStock === 0,
+    // ✅ QUERY BRANCH_STOCKS TABLE
+    const branchStocks = await BranchStock.findAll({
+      where: whereClause,
+      include: [
+        {
+          model: Product,
+          as: "product",
+          where: { status: "ACTIVE" },
+          attributes: [],
+        },
+      ],
+    });
+
+    // Calculate summary
+    const totalProducts = new Set(branchStocks.map((bs) => bs.productId)).size;
+    const outOfStock = branchStocks.filter((bs) => bs.currentStock === 0).length;
+    const lowStock = branchStocks.filter(
+      (bs) => bs.currentStock > 0 && bs.currentStock <= bs.reorderPoint,
     ).length;
-    const lowStock = filteredProducts.filter(
-      (p) => p.currentStock > 0 && p.currentStock <= (p.reorderPoint || 20),
-    ).length;
-    const criticalStock = filteredProducts.filter(
-      (p) => p.currentStock > 0 && p.currentStock <= (p.minimumStock || 10),
+    const criticalStock = branchStocks.filter(
+      (bs) => bs.currentStock > 0 && bs.currentStock <= bs.minimumStock,
     ).length;
 
-    const recentTransactionsWhere = {
+    // Recent transactions
+    const transactionsWhere = {
       createdAt: {
         [Op.gte]: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
       },
     };
 
-    // Filter recent transactions by branch
     if (!canViewAllBranches && activeBranchId) {
-      recentTransactionsWhere.branchId = activeBranchId;
+      transactionsWhere.branchId = activeBranchId;
     }
 
     const recentTransactions = await Stock.count({
-      where: recentTransactionsWhere,
+      where: transactionsWhere,
     });
 
     return res.status(200).json({
