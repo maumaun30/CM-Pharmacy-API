@@ -18,6 +18,11 @@ module.exports = {
         allowNull: false,
         unique: true,
       },
+      barcode: {
+        type: Sequelize.STRING,
+        allowNull: true,
+        unique: true,
+      },
       description: {
         type: Sequelize.TEXT,
         allowNull: true,

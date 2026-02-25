@@ -97,7 +97,7 @@ exports.getAllProducts = async (req, res) => {
     // Transform response to include stock info
     const response = filteredProducts.map((product) => {
       const productData = product.toJSON();
-      
+
       // Calculate total stock across all branches
       const totalStock = productData.branchStocks.reduce(
         (sum, bs) => sum + (bs.currentStock || 0),
@@ -160,7 +160,7 @@ exports.getProductById = async (req, res) => {
     }
 
     const productData = product.toJSON();
-    
+
     // Calculate total stock
     const totalStock = productData.branchStocks.reduce(
       (sum, bs) => sum + (bs.currentStock || 0),
@@ -184,6 +184,7 @@ exports.createProduct = async (req, res) => {
     const {
       name,
       sku,
+      barcode,
       description,
       price,
       cost,
@@ -215,6 +216,14 @@ exports.createProduct = async (req, res) => {
         .json({ message: "Product with this SKU already exists" });
     }
 
+    // Check if barcode already exists
+    const existingBarcode = await Product.findOne({ where: { barcode } });
+    if (existingBarcode) {
+      return res
+        .status(400)
+        .json({ message: "Product with this barcode already exists" });
+    }
+
     // Check if category exists
     const category = await Category.findByPk(categoryId);
     if (!category) {
@@ -224,6 +233,7 @@ exports.createProduct = async (req, res) => {
     const newProduct = await Product.create({
       name,
       sku,
+      barcode,
       description,
       price,
       cost,
@@ -295,6 +305,7 @@ exports.updateProduct = async (req, res) => {
     const {
       name,
       sku,
+      barcode,
       description,
       price,
       cost,
@@ -325,6 +336,16 @@ exports.updateProduct = async (req, res) => {
       }
     }
 
+    // Check if barcode already exists
+    if (barcode && barcode !== product.barcode) {
+      const existingBarcode = await Product.findOne({ where: { barcode } });
+      if (existingBarcode) {
+        return res
+          .status(400)
+          .json({ message: "Product with this barcode already exists" });
+      }
+    }
+
     // Check if category exists if updated
     if (categoryId && categoryId !== product.categoryId) {
       const category = await Category.findByPk(categoryId);
@@ -336,6 +357,7 @@ exports.updateProduct = async (req, res) => {
     await product.update({
       name: name || product.name,
       sku: sku || product.sku,
+      barcode: barcode || product.barcode,
       description:
         description !== undefined ? description : product.description,
       price: price !== undefined ? price : product.price,
@@ -457,7 +479,7 @@ exports.getProductBranchStock = async (req, res) => {
         {
           model: Product,
           as: "product",
-          attributes: ["id", "name", "sku", "brandName"],
+          attributes: ["id", "name", "sku", "barcode", "brandName"],
         },
         {
           model: Branch,
@@ -543,7 +565,9 @@ exports.getLowStockProducts = async (req, res) => {
     const whereClause = {
       [Op.or]: [
         { currentStock: { [Op.eq]: 0 } },
-        sequelize.literal('"BranchStock"."currentStock" <= "BranchStock"."reorderPoint"'),
+        sequelize.literal(
+          '"BranchStock"."currentStock" <= "BranchStock"."reorderPoint"',
+        ),
       ],
     };
 
