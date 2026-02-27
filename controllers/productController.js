@@ -201,7 +201,15 @@ exports.createProduct = async (req, res) => {
     } = req.body;
 
     // Validate required fields
-    if (!name || !sku || !price || !cost || !categoryId) {
+    if (
+      !name ||
+      !sku ||
+      price === undefined ||
+      price === null ||
+      cost === undefined ||
+      cost === null ||
+      !categoryId
+    ) {
       return res.status(400).json({
         message:
           "Missing required fields: name, sku, price, cost and categoryId are required",
@@ -216,12 +224,14 @@ exports.createProduct = async (req, res) => {
         .json({ message: "Product with this SKU already exists" });
     }
 
-    // Check if barcode already exists
-    const existingBarcode = await Product.findOne({ where: { barcode } });
-    if (existingBarcode) {
-      return res
-        .status(400)
-        .json({ message: "Product with this barcode already exists" });
+    // Only check barcode uniqueness if barcode is provided
+    if (barcode) {
+      const existingBarcode = await Product.findOne({ where: { barcode } });
+      if (existingBarcode) {
+        return res
+          .status(400)
+          .json({ message: "Product with this barcode already exists" });
+      }
     }
 
     // Check if category exists
@@ -248,7 +258,11 @@ exports.createProduct = async (req, res) => {
     });
 
     // Initialize branch stocks if provided
-    if (branchStocks && Array.isArray(branchStocks)) {
+    if (
+      branchStocks &&
+      Array.isArray(branchStocks) &&
+      branchStocks.length > 0
+    ) {
       for (const branchStock of branchStocks) {
         await BranchStock.create({
           productId: newProduct.id,
@@ -257,6 +271,19 @@ exports.createProduct = async (req, res) => {
           minimumStock: branchStock.minimumStock || 10,
           maximumStock: branchStock.maximumStock || null,
           reorderPoint: branchStock.reorderPoint || 20,
+        });
+      }
+    } else {
+      // Auto-initialize stock for ALL branches when none specified
+      const allBranches = await Branch.findAll();
+      for (const branch of allBranches) {
+        await BranchStock.create({
+          productId: newProduct.id,
+          branchId: branch.id,
+          currentStock: 0,
+          minimumStock: 10,
+          maximumStock: null,
+          reorderPoint: 20,
         });
       }
     }
@@ -336,7 +363,7 @@ exports.updateProduct = async (req, res) => {
       }
     }
 
-    // Check if barcode already exists
+    // Only check barcode uniqueness if barcode is provided
     if (barcode && barcode !== product.barcode) {
       const existingBarcode = await Product.findOne({ where: { barcode } });
       if (existingBarcode) {
@@ -479,7 +506,7 @@ exports.getProductBranchStock = async (req, res) => {
         {
           model: Product,
           as: "product",
-          attributes: ["id", "name", "sku", "barcode", "brandName"],
+          attributes: ["id", "name", "sku", "brandName"],
         },
         {
           model: Branch,

@@ -20,28 +20,28 @@ router.get("/:id", productController.getProductById);
 // Create new product
 router.post(
   "/",
-  authorizeRoles(["admin", "manager"]),
+  authorizeRoles("admin", "manager"),
   productController.createProduct,
 );
 
 // Update product
 router.put(
   "/:id",
-  authorizeRoles(["admin", "manager"]),
+  authorizeRoles("admin", "manager"),
   productController.updateProduct,
 );
 
 // Delete product
 router.delete(
   "/:id",
-  authorizeRoles(["admin"]),
+  authorizeRoles("admin"),
   productController.deleteProduct,
 );
 
 // Toggle product status
 router.patch(
   "/:id/toggle-status",
-  authorizeRoles(["admin", "manager"]),
+  authorizeRoles("admin", "manager"),
   productController.toggleProductStatus,
 );
 
@@ -54,7 +54,7 @@ router.get(
 // Update stock levels for specific branch (thresholds only)
 router.patch(
   "/:productId/branch/:branchId/stock",
-  authorizeRoles(["admin", "manager"]),
+  authorizeRoles("admin", "manager"),
   productController.updateBranchStock,
 );
 

@@ -26,21 +26,21 @@ router.get("/branch/:branchId", branchStockController.getBranchStock);
 // Initialize stock for a product in a branch
 router.post(
   "/initialize",
-  authorizeRoles(["ADMIN", "MANAGER"]),
+  authorizeRoles("admin", "manager"),
   branchStockController.initializeBranchStock,
 );
 
 // Update branch stock settings (thresholds only, not quantity)
 router.patch(
   "/:id/settings",
-  authorizeRoles(["ADMIN", "MANAGER"]),
+  authorizeRoles("admin", "manager"),
   branchStockController.updateBranchStockSettings,
 );
 
 // Transfer stock between branches
 router.post(
   "/transfer",
-  authorizeRoles(["ADMIN", "MANAGER"]),
+  authorizeRoles("admin", "manager"),
   branchStockController.transferStock,
 );
 
