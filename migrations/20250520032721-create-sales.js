@@ -71,8 +71,17 @@ module.exports = {
         allowNull: false,
         defaultValue: Sequelize.literal("CURRENT_TIMESTAMP"),
       },
+      status: {
+        type: Sequelize.ENUM(
+          "completed",
+          "partially_refunded",
+          "fully_refunded",
+        ),
+        defaultValue: "completed",
+        allowNull: false,
+      },
     });
-    
+
     await queryInterface.addIndex("sales", ["branchId"]);
 
     // Add index for soldBy foreign key

@@ -18,6 +18,11 @@ module.exports = (sequelize, DataTypes) => {
         foreignKey: "branchId",
         as: "branch",
       });
+
+      Sale.hasMany(models.Refund, {
+        foreignKey: "saleId",
+        as: "refunds",
+      });
     }
   }
 
@@ -69,6 +74,14 @@ module.exports = (sequelize, DataTypes) => {
           model: "branches",
           key: "id",
         },
+      },
+      status: {
+        type: DataTypes.ENUM(
+          "completed",
+          "partially_refunded",
+          "fully_refunded",
+        ),
+        defaultValue: "completed",
       },
     },
     {

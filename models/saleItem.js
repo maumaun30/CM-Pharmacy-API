@@ -6,18 +6,23 @@ module.exports = (sequelize, DataTypes) => {
     static associate(models) {
       SaleItem.belongsTo(models.Sale, {
         foreignKey: "saleId",
-        as: "Sale", // Optional: add alias
+        as: "Sale",
       });
-      
+
       SaleItem.belongsTo(models.Product, {
         foreignKey: "productId",
-        as: "Product", // Make sure this matches the include
+        as: "Product",
       });
-      
+
       SaleItem.belongsTo(models.Discount, {
         foreignKey: "discountId",
-        as: "Discount", // Make sure this matches the include
+        as: "Discount",
         required: false,
+      });
+
+      SaleItem.hasMany(models.RefundItem, {
+        foreignKey: "saleItemId",
+        as: "refundItems",
       });
     }
   }
@@ -75,7 +80,7 @@ module.exports = (sequelize, DataTypes) => {
       modelName: "SaleItem",
       tableName: "sale_items",
       timestamps: false,
-    }
+    },
   );
 
   return SaleItem;
