@@ -1,5 +1,6 @@
 const { Sale, Product, User, BranchStock, Branch, sequelize } = require("../models");
 const { Op } = require("sequelize");
+const dayjs = require("dayjs");
 
 /**
  * Get dashboard statistics with branch-based stock
@@ -440,6 +441,125 @@ exports.getStockAlerts = async (req, res) => {
     console.error("Stock alerts error:", error);
     res.status(500).json({
       message: "Error fetching stock alerts",
+      error: error.message,
+    });
+  }
+};
+
+// ─── Helper: dateKey per mode ────────────────────────────────────────────────
+function getDateKey(soldAt, mode) {
+  const d = dayjs(soldAt);
+  if (mode === "daily") return d.format("HH");      // "09"
+  return d.format("YYYY-MM-DD");                    // "2026-03-03"
+}
+
+// ─── Helper: build empty skeleton ───────────────────────────────────────────
+function buildSkeleton(mode, rangeStart) {
+  const points = [];
+
+  if (mode === "daily") {
+    for (let h = 0; h < 24; h++) {
+      const hour = String(h).padStart(2, "0");
+      points.push({
+        label: dayjs(rangeStart).hour(h).format("h A"), // "9 AM"
+        dateKey: hour,
+        sales: 0,
+        transactions: 0,
+      });
+    }
+  } else if (mode === "weekly") {
+    for (let d = 0; d < 7; d++) {
+      const day = dayjs(rangeStart).add(d, "day");
+      points.push({
+        label: day.format("ddd"),           // "Mon"
+        dateKey: day.format("YYYY-MM-DD"),
+        sales: 0,
+        transactions: 0,
+      });
+    }
+  } else {
+    // monthly — one point per day in the month
+    const daysInMonth = dayjs(rangeStart).daysInMonth();
+    for (let d = 0; d < daysInMonth; d++) {
+      const day = dayjs(rangeStart).add(d, "day");
+      points.push({
+        label: day.format("D"),             // "1", "15", "31"
+        dateKey: day.format("YYYY-MM-DD"),
+        sales: 0,
+        transactions: 0,
+      });
+    }
+  }
+
+  return points;
+}
+
+// ─── Controller ──────────────────────────────────────────────────────────────
+exports.getSalesTrend = async (req, res) => {
+  try {
+    const { Sale } = require("../models");
+    const { Op } = require("sequelize");
+
+    const userRole = req.user.role;
+    const userBranchId = req.user.branchId;
+    const currentBranchId = req.user.currentBranchId;
+
+    // Mirror the branch filtering used in getDashboardStats
+    let branchFilter = {};
+    if (userRole === "admin" && currentBranchId) {
+      branchFilter = { branchId: currentBranchId };
+    } else if (userRole !== "admin") {
+      branchFilter = { branchId: userBranchId };
+    }
+
+    const mode   = req.query.mode   || "daily";
+    const offset = parseInt(req.query.offset ?? "0", 10);
+
+    // Build the date window
+    let rangeStart, rangeEnd;
+    if (mode === "daily") {
+      rangeStart = dayjs().add(offset, "day").startOf("day").toDate();
+      rangeEnd   = dayjs().add(offset, "day").endOf("day").toDate();
+    } else if (mode === "weekly") {
+      rangeStart = dayjs().add(offset, "week").startOf("week").toDate();
+      rangeEnd   = dayjs().add(offset, "week").endOf("week").toDate();
+    } else {
+      rangeStart = dayjs().add(offset, "month").startOf("month").toDate();
+      rangeEnd   = dayjs().add(offset, "month").endOf("month").toDate();
+    }
+
+    // Fetch all sales in window (lightweight query — just id, amount, soldAt)
+    const sales = await Sale.findAll({
+      where: {
+        soldAt: { [Op.between]: [rangeStart, rangeEnd] },
+        ...branchFilter,
+      },
+      attributes: ["id", "totalAmount", "soldAt"],
+      order: [["soldAt", "ASC"]],
+      raw: true,
+    });
+
+    // Fill skeleton with actual data
+    const points = buildSkeleton(mode, rangeStart);
+    let totalSales = 0;
+    let totalTransactions = 0;
+
+    for (const sale of sales) {
+      const key   = getDateKey(sale.soldAt, mode);
+      const point = points.find((p) => p.dateKey === key);
+      if (point) {
+        point.sales        += parseFloat(sale.totalAmount);
+        point.transactions += 1;
+      }
+      totalSales        += parseFloat(sale.totalAmount);
+      totalTransactions += 1;
+    }
+
+    return res.json({ points, totalSales, totalTransactions });
+  } catch (error) {
+    console.error("Sales trend error:", error);
+    return res.status(500).json({
+      message: "Error fetching sales trend",
       error: error.message,
     });
   }

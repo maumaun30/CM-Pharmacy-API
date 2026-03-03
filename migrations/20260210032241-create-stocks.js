@@ -38,6 +38,7 @@ module.exports = {
           "ADJUSTMENT",
           "DAMAGE",
           "EXPIRED",
+          "REFUND",
         ),
         allowNull: false,
         comment: "Type of stock transaction",

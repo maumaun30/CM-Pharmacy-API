@@ -9,7 +9,7 @@ router.use(authenticateUser);
 router.post("/", saleController.createSale);
 router.get("/", saleController.getSales);
 
-router.post("/sales/:saleId/refunds", refundController.createRefund);
-router.get("/sales/:saleId/refunds", refundController.getRefundsBySale);
+router.post("/:saleId/refunds", refundController.createRefund);
+router.get("/:saleId/refunds", refundController.getRefundsBySale);
 
 module.exports = router;

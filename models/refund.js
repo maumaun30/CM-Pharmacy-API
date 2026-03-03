@@ -60,7 +60,7 @@ module.exports = (sequelize, DataTypes) => {
     {
       sequelize,
       modelName: "Refund",
-      tableName: "Refunds",
+      tableName: "refunds",
       timestamps: true,
       updatedAt: false, // Refunds are immutable once created
     },

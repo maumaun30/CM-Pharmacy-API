@@ -394,6 +394,7 @@ exports.getSales = async (req, res) => {
           }
         : null,
       items: sale.items.map((item) => ({
+        id: item.id,
         product: {
           id: item.Product.id,
           name: item.Product.name,

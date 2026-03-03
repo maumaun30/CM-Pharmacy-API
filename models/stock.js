@@ -172,6 +172,7 @@ module.exports = (sequelize, DataTypes) => {
           "EXPIRED",
           "TRANSFER_IN",
           "TRANSFER_OUT",
+          "REFUND",
         ),
         allowNull: false,
       },
