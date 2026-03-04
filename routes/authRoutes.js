@@ -23,4 +23,7 @@ router.post(
 
 router.get("/me", authenticateUser, authController.getCurrentUser);
 
+router.post("/login-pin", authController.loginWithPin);
+router.put("/pin", authenticateUser, authController.setPin);
+
 module.exports = router;

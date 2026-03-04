@@ -21,6 +21,12 @@ module.exports = (sequelize, DataTypes) => {
       return await bcrypt.compare(password, this.password);
     }
 
+    // Add method alongside validatePassword:
+    async validatePin(pin) {
+      if (!this.pin) return false;
+      return await bcrypt.compare(pin, this.pin);
+    }
+
     getActiveBranch() {
       return this.currentBranchId || this.branchId;
     }
@@ -50,6 +56,10 @@ module.exports = (sequelize, DataTypes) => {
         validate: {
           len: [6, 100],
         },
+      },
+      pin: {
+        type: DataTypes.STRING,
+        allowNull: true,
       },
       role: {
         type: DataTypes.ENUM("admin", "cashier", "manager"),
@@ -117,11 +127,19 @@ module.exports = (sequelize, DataTypes) => {
             const salt = await bcrypt.genSalt(10);
             user.password = await bcrypt.hash(user.password, salt);
           }
+          if (user.pin) {
+            const salt = await bcrypt.genSalt(10);
+            user.pin = await bcrypt.hash(user.pin, salt);
+          }
         },
         beforeUpdate: async (user) => {
           if (user.changed("password")) {
             const salt = await bcrypt.genSalt(10);
             user.password = await bcrypt.hash(user.password, salt);
+          }
+          if (user.changed("pin")) {
+            const salt = await bcrypt.genSalt(10);
+            user.pin = await bcrypt.hash(user.pin, salt);
           }
         },
       },

@@ -306,3 +306,94 @@ exports.getCurrentUser = async (req, res) => {
     });
   }
 };
+
+// Add this new export to authController.js
+exports.loginWithPin = async (req, res) => {
+  try {
+    const { username, pin } = req.body;
+
+    if (!username || !pin) {
+      return res.status(400).json({ message: "Username and PIN are required" });
+    }
+
+    if (!/^\d{4,6}$/.test(pin)) {
+      return res.status(400).json({ message: "PIN must be 4–6 digits" });
+    }
+
+    const user = await User.findOne({ where: { username } });
+
+    if (!user || !(await user.validatePin(pin))) {
+      return res.status(401).json({ message: "Invalid credentials" });
+    }
+
+    if (!user.isActive) {
+      return res
+        .status(401)
+        .json({ message: "Account is inactive. Contact administrator." });
+    }
+
+    const token = jwt.sign(
+      { id: user.id, username: user.username, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN },
+    );
+
+    await createLog(
+      req,
+      "LOGIN",
+      "auth",
+      user.id,
+      `User ${user.username} logged in via PIN`,
+      { role: user.role },
+    );
+
+    return res.status(200).json({
+      message: "Login successful",
+      user: {
+        id: user.id,
+        username: user.username,
+        email: user.email,
+        role: user.role,
+      },
+      token,
+    });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
+  }
+};
+
+// Update setPin (for profile/account settings use)
+exports.setPin = async (req, res) => {
+  try {
+    const { pin } = req.body;
+    const userId = req.user.id;
+
+    if (pin && !/^\d{4,6}$/.test(pin)) {
+      return res.status(400).json({ message: "PIN must be 4–6 digits" });
+    }
+
+    const user = await User.findByPk(userId);
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    user.pin = pin || null; // null clears the PIN
+    await user.save();
+
+    await createLog(
+      req,
+      "UPDATE",
+      "auth",
+      userId,
+      `User ${user.username} ${pin ? "set" : "removed"} PIN`,
+    );
+
+    return res
+      .status(200)
+      .json({ message: pin ? "PIN set successfully" : "PIN removed" });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
+  }
+};

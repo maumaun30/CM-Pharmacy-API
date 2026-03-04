@@ -23,6 +23,10 @@ module.exports = {
         type: Sequelize.STRING,
         allowNull: false,
       },
+      pin: {
+        type: Sequelize.STRING,
+        allowNull: true,
+      },
       role: {
         type: Sequelize.ENUM("admin", "cashier", "manager"),
         allowNull: false,

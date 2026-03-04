@@ -28,7 +28,9 @@ exports.createUser = async (req, res) => {
       contactNumber,
       isActive,
       branchId,
+      pin,
     } = req.body;
+
     const hashedPassword = await bcrypt.hash("staff123", 10);
 
     // Check if email already exists
@@ -55,6 +57,7 @@ exports.createUser = async (req, res) => {
       contactNumber,
       isActive,
       branchId,
+      pin: pin || null,
     });
 
     await createLog(
@@ -150,6 +153,7 @@ exports.updateUser = async (req, res) => {
     if (contactNumber) user.contactNumber = contactNumber;
     if (isActive !== undefined) user.isActive = isActive;
     if (branchId) user.branchId = branchId;
+    if (pin !== undefined) user.pin = pin || null;
 
     await user.save();
 
