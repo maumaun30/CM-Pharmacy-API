@@ -12,19 +12,16 @@
     "db:reset": "npx sequelize-cli db:drop && npx sequelize-cli db:create && npm run db:migrate && npm run db:seed"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.100.0",
     "bcryptjs": "^3.0.3",
     "cors": "^2.8.5",
     "dayjs": "^1.11.19",
     "dotenv": "^16.0.3",
     "express": "^4.18.2",
     "jsonwebtoken": "^9.0.2",
-    "pg": "^8.11.0",
-    "pg-hstore": "^2.3.4",
-    "sequelize": "^6.31.1",
     "socket.io": "^4.8.3"
   },
   "devDependencies": {
-    "nodemon": "^2.0.22",
-    "sequelize-cli": "^6.6.0"
+    "nodemon": "^2.0.22"
   }
 }
