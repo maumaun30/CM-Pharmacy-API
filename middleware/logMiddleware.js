@@ -1,36 +1,34 @@
-// middleware/logMiddleware.js
-const { Log } = require("../models");
+const supabase = require("../config/supabase");
 
-// Extract IP address from request
-const getIpAddress = (req) => {
-  return (
-    req.headers["x-forwarded-for"]?.split(",")[0] ||
-    req.headers["x-real-ip"] ||
-    req.connection.remoteAddress ||
-    req.socket.remoteAddress ||
-    null
-  );
-};
+// ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// Extract user agent
-const getUserAgent = (req) => {
-  return req.headers["user-agent"] || null;
-};
+const getIpAddress = (req) =>
+  req.headers["x-forwarded-for"]?.split(",")[0] ||
+  req.headers["x-real-ip"] ||
+  req.connection?.remoteAddress ||
+  req.socket?.remoteAddress ||
+  null;
 
-// Create log helper function
+const getUserAgent = (req) => req.headers["user-agent"] || null;
+
+// ─── createLog ────────────────────────────────────────────────────────────────
+// Drop-in replacement for the Sequelize version.
+// Signature is identical — all controllers call this without changes.
+
 const createLog = async (req, action, module, recordId, description, metadata = null) => {
   try {
-    await Log.createLog({
-      userId: req.user?.id || null,
+    await supabase.from("logs").insert({
+      user_id:     req.user?.id   || null,
       action,
       module,
-      recordId,
-      description,
-      metadata,
-      ipAddress: getIpAddress(req),
-      userAgent: getUserAgent(req),
+      record_id:   recordId       || null,
+      description: description    || null,
+      metadata:    metadata       || null,
+      ip_address:  getIpAddress(req),
+      user_agent:  getUserAgent(req),
     });
   } catch (error) {
+    // Logging should never crash the main request
     console.error("Logging error:", error);
   }
 };
