@@ -1,32 +1,55 @@
-// controllers/stockController.js
-const { Stock, Product, User, Branch, BranchStock, sequelize } = require("../models");
-const { Op } = require("sequelize");
+const supabase = require("../config/supabase");
 const { createLog } = require("../middleware/logMiddleware");
 const { emitStockUpdate, emitLowStockAlert, emitDashboardRefresh } = require("../utils/socket");
 
-// Helper function to get user's active branch
+// ─── Shared select strings ────────────────────────────────────────────────────
+
+const STOCK_WITH_DETAILS = `
+  *,
+  product:products (id, name, sku),
+  user:users       (id, username, first_name, last_name),
+  branch:branches  (id, name, code)
+`;
+
+// ─── Helper: resolve user's active branch ────────────────────────────────────
+
 const getUserActiveBranch = async (userId) => {
-  const user = await User.findByPk(userId, {
-    include: [
-      { model: Branch, as: "branch" },
-      { model: Branch, as: "currentBranch" },
-    ],
-  });
+  const { data: user, error } = await supabase
+    .from("users")
+    .select("id, role, branch_id, current_branch_id")
+    .eq("id", userId)
+    .maybeSingle();
 
-  if (!user) {
-    throw new Error("User not found");
-  }
+  if (error) throw error;
+  if (!user) throw new Error("User not found");
 
-  const activeBranchId = user.currentBranchId || user.branchId;
+  const activeBranchId = user.current_branch_id || user.branch_id;
 
   return {
     user,
     activeBranchId,
-    canViewAllBranches: user.role === "admin" && !user.currentBranchId,
+    canViewAllBranches: user.role === "admin" && !user.current_branch_id,
   };
 };
 
-// Get stock history for a product
+// ─── Helper: emit low stock alert if threshold crossed ───────────────────────
+
+const maybeEmitLowStock = (activeBranchId, branchStock, product, quantityAfter) => {
+  if (quantityAfter <= branchStock.reorder_point) {
+    emitLowStockAlert(activeBranchId, {
+      id:           product.id,
+      name:         product.name,
+      sku:          product.sku,
+      currentStock: quantityAfter,
+      reorderPoint: branchStock.reorder_point,
+      minimumStock: branchStock.minimum_stock,
+      branchId:     activeBranchId,
+    });
+  }
+};
+
+// ─── Get Product Stock History ────────────────────────────────────────────────
+
 exports.getProductStockHistory = async (req, res) => {
   try {
     const { productId } = req.params;
@@ -34,58 +57,39 @@ exports.getProductStockHistory = async (req, res) => {
 
     const { activeBranchId, canViewAllBranches } = await getUserActiveBranch(req.user.id);
 
-    const whereClause = { productId };
+    const pageNum  = parseInt(page);
+    const pageSize = parseInt(limit);
+    const offset   = (pageNum - 1) * pageSize;
 
-    // Filter by branch unless admin viewing all branches
-    if (!canViewAllBranches) {
-      whereClause.branchId = activeBranchId;
-    }
+    let query = supabase
+      .from("stocks")
+      .select(STOCK_WITH_DETAILS, { count: "exact" })
+      .eq("product_id", productId)
+      .order("created_at", { ascending: false })
+      .range(offset, offset + pageSize - 1);
 
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    if (!canViewAllBranches) query = query.eq("branch_id", activeBranchId);
 
-    const { count, rows: stocks } = await Stock.findAndCountAll({
-      where: whereClause,
-      include: [
-        {
-          model: Product,
-          as: "product",
-          attributes: ["id", "name", "sku"],
-        },
-        {
-          model: User,
-          as: "user",
-          attributes: ["id", "username", "firstName", "lastName"],
-        },
-        {
-          model: Branch,
-          as: "branch",
-          attributes: ["id", "name", "code"],
-        },
-      ],
-      order: [["createdAt", "DESC"]],
-      limit: parseInt(limit),
-      offset,
-    });
+    const { data: stocks, count, error } = await query;
+    if (error) throw error;
 
     return res.status(200).json({
       stocks,
       pagination: {
-        total: count,
-        page: parseInt(page),
-        limit: parseInt(limit),
-        totalPages: Math.ceil(count / parseInt(limit)),
+        total:      count,
+        page:       pageNum,
+        limit:      pageSize,
+        totalPages: Math.ceil(count / pageSize),
       },
     });
   } catch (error) {
     console.error("Error fetching stock history:", error);
-    return res.status(500).json({
-      message: "Server error",
-      error: error.message,
-    });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// Get all stock transactions
+// ─── Get All Stock Transactions ───────────────────────────────────────────────
+
 exports.getAllStockTransactions = async (req, res) => {
   try {
     const {
@@ -93,525 +97,375 @@ exports.getAllStockTransactions = async (req, res) => {
       search,
       dateFrom,
       dateTo,
-      page = 1,
+      page  = 1,
       limit = 50,
     } = req.query;
 
     const { activeBranchId, canViewAllBranches } = await getUserActiveBranch(req.user.id);
 
-    const whereClause = {};
+    const pageNum  = parseInt(page);
+    const pageSize = parseInt(limit);
+    const offset   = (pageNum - 1) * pageSize;
 
-    // Filter by branch unless admin viewing all branches
-    if (!canViewAllBranches) {
-      whereClause.branchId = activeBranchId;
-    }
+    let query = supabase
+      .from("stocks")
+      .select(STOCK_WITH_DETAILS, { count: "exact" })
+      .order("created_at", { ascending: false })
+      .range(offset, offset + pageSize - 1);
 
-    if (transactionType) {
-      whereClause.transactionType = transactionType;
-    }
-
-    if (dateFrom) {
-      whereClause.createdAt = {
-        [Op.gte]: new Date(dateFrom),
-      };
-    }
-
+    if (!canViewAllBranches)  query = query.eq("branch_id", activeBranchId);
+    if (transactionType)      query = query.eq("transaction_type", transactionType);
+    if (dateFrom)             query = query.gte("created_at", new Date(dateFrom).toISOString());
     if (dateTo) {
       const endOfDay = new Date(dateTo);
       endOfDay.setHours(23, 59, 59, 999);
-      whereClause.createdAt = {
-        ...whereClause.createdAt,
-        [Op.lte]: endOfDay,
-      };
+      query = query.lte("created_at", endOfDay.toISOString());
     }
 
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+    // Product search — filter in JS post-fetch (Supabase can't filter on joined columns)
+    const { data: stocks, count, error } = await query;
+    if (error) throw error;
 
-    const { count, rows: stocks } = await Stock.findAndCountAll({
-      where: whereClause,
-      include: [
-        {
-          model: Product,
-          as: "product",
-          attributes: ["id", "name", "sku"],
-          where: search
-            ? {
-                [Op.or]: [
-                  { name: { [Op.iLike]: `%${search}%` } },
-                  { sku: { [Op.iLike]: `%${search}%` } },
-                ],
-              }
-            : undefined,
-        },
-        {
-          model: User,
-          as: "user",
-          attributes: ["id", "username", "firstName", "lastName"],
-        },
-        {
-          model: Branch,
-          as: "branch",
-          attributes: ["id", "name", "code"],
-        },
-      ],
-      order: [["createdAt", "DESC"]],
-      limit: parseInt(limit),
-      offset,
-    });
+    let filtered = stocks;
+    if (search) {
+      const term = search.toLowerCase();
+      filtered = stocks.filter(
+        (s) =>
+          s.product?.name?.toLowerCase().includes(term) ||
+          s.product?.sku?.toLowerCase().includes(term)
+      );
+    }
 
     return res.status(200).json({
-      stocks,
+      stocks: filtered,
       pagination: {
-        total: count,
-        page: parseInt(page),
-        limit: parseInt(limit),
-        totalPages: Math.ceil(count / parseInt(limit)),
+        total:      count,
+        page:       pageNum,
+        limit:      pageSize,
+        totalPages: Math.ceil(count / pageSize),
       },
     });
   } catch (error) {
     console.error("Error fetching stock transactions:", error);
-    return res.status(500).json({
-      message: "Server error",
-      error: error.message,
-    });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// Add stock (purchase/initial/return)
+// ─── Add Stock (purchase / initial / return) ──────────────────────────────────
+
 exports.addStock = async (req, res) => {
   try {
     const {
-      productId,
-      quantity,
-      unitCost,
-      batchNumber,
-      expiryDate,
-      supplier,
-      transactionType = "PURCHASE",
+      productId, quantity, unitCost, batchNumber,
+      expiryDate, supplier, transactionType = "PURCHASE",
     } = req.body;
 
     if (!productId || !quantity || quantity <= 0) {
-      return res.status(400).json({
-        message: "Product ID and positive quantity are required",
-      });
+      return res.status(400).json({ message: "Product ID and positive quantity are required" });
     }
 
     const { activeBranchId } = await getUserActiveBranch(req.user.id);
-
     if (!activeBranchId) {
-      return res.status(400).json({
-        message: "User is not assigned to any branch",
-      });
+      return res.status(400).json({ message: "User is not assigned to any branch" });
     }
 
-    // ✅ GET BRANCH STOCK (not product stock)
-    const branchStock = await BranchStock.findOne({
-      where: { productId, branchId: activeBranchId },
-    });
+    const { data: branchStock, error: stockError } = await supabase
+      .from("branch_stocks")
+      .select("*")
+      .eq("product_id", productId)
+      .eq("branch_id", activeBranchId)
+      .maybeSingle();
 
+    if (stockError) throw stockError;
     if (!branchStock) {
-      return res.status(404).json({
-        message: "Product not found in this branch inventory",
-      });
+      return res.status(404).json({ message: "Product not found in this branch inventory" });
     }
 
-    const quantityBefore = branchStock.currentStock;
-    const quantityAfter = quantityBefore + Math.abs(quantity);
+    const quantityBefore = branchStock.current_stock;
+    const quantityAfter  = quantityBefore + Math.abs(quantity);
 
-    // ✅ UPDATE BRANCH STOCK
-    await branchStock.update({ currentStock: quantityAfter });
+    // Update branch stock
+    const { error: updateError } = await supabase
+      .from("branch_stocks")
+      .update({ current_stock: quantityAfter })
+      .eq("product_id", productId)
+      .eq("branch_id", activeBranchId);
+    if (updateError) throw updateError;
 
-    // ✅ CREATE STOCK TRANSACTION with before/after
-    const stock = await Stock.create({
-      productId,
-      branchId: activeBranchId,
-      transactionType,
-      quantity: Math.abs(quantity),
-      quantityBefore,
-      quantityAfter,
-      unitCost: unitCost ? parseFloat(unitCost) : null,
-      totalCost: unitCost ? parseFloat(unitCost) * Math.abs(quantity) : null,
-      batchNumber: batchNumber || null,
-      expiryDate: expiryDate ? new Date(expiryDate) : null,
-      supplier: supplier || null,
-      performedBy: req.user.id,
-    });
+    // Create stock transaction
+    const { data: stock, error: insertError } = await supabase
+      .from("stocks")
+      .insert({
+        product_id:       productId,
+        branch_id:        activeBranchId,
+        transaction_type: transactionType,
+        quantity:         Math.abs(quantity),
+        quantity_before:  quantityBefore,
+        quantity_after:   quantityAfter,
+        unit_cost:        unitCost  ? parseFloat(unitCost) : null,
+        total_cost:       unitCost  ? parseFloat(unitCost) * Math.abs(quantity) : null,
+        batch_number:     batchNumber || null,
+        expiry_date:      expiryDate  ? new Date(expiryDate).toISOString() : null,
+        supplier:         supplier    || null,
+        performed_by:     req.user.id,
+      })
+      .select(STOCK_WITH_DETAILS)
+      .single();
+
+    if (insertError) throw insertError;
 
     await createLog(
-      req,
-      "CREATE",
-      "stocks",
-      stock.id,
+      req, "CREATE", "stocks", stock.id,
       `Added ${quantity} units to product ${productId} at branch ${activeBranchId}`,
-      { stock: stock.toJSON() },
+      { stock }
     );
 
-    const stockWithDetails = await Stock.findByPk(stock.id, {
-      include: [
-        {
-          model: Product,
-          as: "product",
-          attributes: ["id", "name", "sku"],
-        },
-        {
-          model: Branch,
-          as: "branch",
-          attributes: ["id", "name", "code"],
-        },
-      ],
-    });
-
-    // ✅ EMIT SOCKET EVENTS with branch context
-    emitStockUpdate(activeBranchId, {
-      productId,
-      newStock: quantityAfter,
-    });
-
-    // Check if low stock
-    if (quantityAfter <= branchStock.reorderPoint) {
-      emitLowStockAlert(activeBranchId, {
-        id: productId,
-        name: stockWithDetails.product.name,
-        sku: stockWithDetails.product.sku,
-        currentStock: quantityAfter,
-        reorderPoint: branchStock.reorderPoint,
-        minimumStock: branchStock.minimumStock,
-        branchId: activeBranchId,
-      });
-    }
-
+    emitStockUpdate(activeBranchId, { productId, newStock: quantityAfter });
+    maybeEmitLowStock(activeBranchId, branchStock, stock.product, quantityAfter);
     emitDashboardRefresh(activeBranchId);
 
-    return res.status(201).json(stockWithDetails);
+    return res.status(201).json(stock);
   } catch (error) {
     console.error("Error adding stock:", error);
-    return res.status(500).json({
-      message: "Server error",
-      error: error.message,
-    });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// Adjust stock (manual adjustment)
+// ─── Adjust Stock (manual adjustment) ────────────────────────────────────────
+
 exports.adjustStock = async (req, res) => {
   try {
     const { productId, quantity, reason } = req.body;
 
     if (!productId || !quantity || !reason) {
-      return res.status(400).json({
-        message: "Product ID, quantity, and reason are required",
-      });
+      return res.status(400).json({ message: "Product ID, quantity, and reason are required" });
     }
 
     const { activeBranchId } = await getUserActiveBranch(req.user.id);
-
     if (!activeBranchId) {
-      return res.status(400).json({
-        message: "User is not assigned to any branch",
-      });
+      return res.status(400).json({ message: "User is not assigned to any branch" });
     }
 
-    // Get branch stock
-    const branchStock = await BranchStock.findOne({
-      where: { productId, branchId: activeBranchId },
-    });
+    const { data: branchStock, error: stockError } = await supabase
+      .from("branch_stocks")
+      .select("*")
+      .eq("product_id", productId)
+      .eq("branch_id", activeBranchId)
+      .maybeSingle();
 
+    if (stockError) throw stockError;
     if (!branchStock) {
-      return res.status(404).json({
-        message: "Product not found in this branch inventory",
-      });
+      return res.status(404).json({ message: "Product not found in this branch inventory" });
     }
 
-    const quantityBefore = branchStock.currentStock;
-    const quantityAfter = Math.max(0, quantityBefore + parseInt(quantity));
+    const quantityBefore = branchStock.current_stock;
+    const quantityAfter  = Math.max(0, quantityBefore + parseInt(quantity));
 
-    // Update branch stock
-    await branchStock.update({ currentStock: quantityAfter });
+    const { error: updateError } = await supabase
+      .from("branch_stocks")
+      .update({ current_stock: quantityAfter })
+      .eq("product_id", productId)
+      .eq("branch_id", activeBranchId);
+    if (updateError) throw updateError;
 
-    // Create transaction
-    const stock = await Stock.create({
-      productId,
-      branchId: activeBranchId,
-      transactionType: "ADJUSTMENT",
-      quantity: parseInt(quantity),
-      quantityBefore,
-      quantityAfter,
-      reason: reason || null,
-      performedBy: req.user.id,
-    });
+    const { data: stock, error: insertError } = await supabase
+      .from("stocks")
+      .insert({
+        product_id:       productId,
+        branch_id:        activeBranchId,
+        transaction_type: "ADJUSTMENT",
+        quantity:         parseInt(quantity),
+        quantity_before:  quantityBefore,
+        quantity_after:   quantityAfter,
+        reason:           reason || null,
+        performed_by:     req.user.id,
+      })
+      .select(STOCK_WITH_DETAILS)
+      .single();
+
+    if (insertError) throw insertError;
 
     await createLog(
-      req,
-      "UPDATE",
-      "stocks",
-      stock.id,
+      req, "UPDATE", "stocks", stock.id,
       `Adjusted stock for product ${productId}: ${quantity > 0 ? "+" : ""}${quantity} at branch ${activeBranchId}`,
-      { stock: stock.toJSON(), reason },
+      { stock, reason }
     );
 
-    const stockWithDetails = await Stock.findByPk(stock.id, {
-      include: [
-        {
-          model: Product,
-          as: "product",
-          attributes: ["id", "name", "sku"],
-        },
-        {
-          model: Branch,
-          as: "branch",
-          attributes: ["id", "name", "code"],
-        },
-      ],
-    });
-
-    // Socket emissions
-    emitStockUpdate(activeBranchId, {
-      productId,
-      newStock: quantityAfter,
-    });
-
-    if (quantityAfter <= branchStock.reorderPoint) {
-      emitLowStockAlert(activeBranchId, {
-        id: productId,
-        name: stockWithDetails.product.name,
-        sku: stockWithDetails.product.sku,
-        currentStock: quantityAfter,
-        reorderPoint: branchStock.reorderPoint,
-        minimumStock: branchStock.minimumStock,
-        branchId: activeBranchId,
-      });
-    }
-
+    emitStockUpdate(activeBranchId, { productId, newStock: quantityAfter });
+    maybeEmitLowStock(activeBranchId, branchStock, stock.product, quantityAfter);
     emitDashboardRefresh(activeBranchId);
 
-    return res.status(201).json(stockWithDetails);
+    return res.status(201).json(stock);
   } catch (error) {
     console.error("Error adjusting stock:", error);
-    return res.status(500).json({
-      message: "Server error",
-      error: error.message,
-    });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// Record damaged/expired stock
+// ─── Record Stock Loss (damage / expired) ────────────────────────────────────
+
 exports.recordStockLoss = async (req, res) => {
   try {
     const { productId, quantity, transactionType, reason, batchNumber } = req.body;
 
     if (!productId || !quantity || quantity <= 0) {
-      return res.status(400).json({
-        message: "Product ID and positive quantity are required",
-      });
+      return res.status(400).json({ message: "Product ID and positive quantity are required" });
     }
-
     if (!["DAMAGE", "EXPIRED"].includes(transactionType)) {
-      return res.status(400).json({
-        message: "Transaction type must be DAMAGE or EXPIRED",
-      });
+      return res.status(400).json({ message: "Transaction type must be DAMAGE or EXPIRED" });
     }
 
     const { activeBranchId } = await getUserActiveBranch(req.user.id);
-
     if (!activeBranchId) {
-      return res.status(400).json({
-        message: "User is not assigned to any branch",
-      });
+      return res.status(400).json({ message: "User is not assigned to any branch" });
     }
 
-    // Get branch stock
-    const branchStock = await BranchStock.findOne({
-      where: { productId, branchId: activeBranchId },
-    });
+    const { data: branchStock, error: stockError } = await supabase
+      .from("branch_stocks")
+      .select("*")
+      .eq("product_id", productId)
+      .eq("branch_id", activeBranchId)
+      .maybeSingle();
 
+    if (stockError) throw stockError;
     if (!branchStock) {
-      return res.status(404).json({
-        message: "Product not found in this branch inventory",
-      });
+      return res.status(404).json({ message: "Product not found in this branch inventory" });
     }
 
-    const quantityBefore = branchStock.currentStock;
-    const quantityAfter = Math.max(0, quantityBefore - Math.abs(quantity));
+    const quantityBefore = branchStock.current_stock;
+    const quantityAfter  = Math.max(0, quantityBefore - Math.abs(quantity));
 
-    // Update branch stock
-    await branchStock.update({ currentStock: quantityAfter });
+    const { error: updateError } = await supabase
+      .from("branch_stocks")
+      .update({ current_stock: quantityAfter })
+      .eq("product_id", productId)
+      .eq("branch_id", activeBranchId);
+    if (updateError) throw updateError;
 
-    // Create transaction (negative quantity)
-    const stock = await Stock.create({
-      productId,
-      branchId: activeBranchId,
-      transactionType,
-      quantity: -Math.abs(quantity),
-      quantityBefore,
-      quantityAfter,
-      reason: reason || null,
-      batchNumber: batchNumber || null,
-      performedBy: req.user.id,
-    });
+    const { data: stock, error: insertError } = await supabase
+      .from("stocks")
+      .insert({
+        product_id:       productId,
+        branch_id:        activeBranchId,
+        transaction_type: transactionType,
+        quantity:         -Math.abs(quantity),
+        quantity_before:  quantityBefore,
+        quantity_after:   quantityAfter,
+        reason:           reason       || null,
+        batch_number:     batchNumber  || null,
+        performed_by:     req.user.id,
+      })
+      .select(STOCK_WITH_DETAILS)
+      .single();
+
+    if (insertError) throw insertError;
 
     await createLog(
-      req,
-      "CREATE",
-      "stocks",
-      stock.id,
+      req, "CREATE", "stocks", stock.id,
       `Recorded ${transactionType.toLowerCase()} stock for product ${productId}: -${quantity} at branch ${activeBranchId}`,
-      { stock: stock.toJSON(), reason },
+      { stock, reason }
     );
 
-    const stockWithDetails = await Stock.findByPk(stock.id, {
-      include: [
-        {
-          model: Product,
-          as: "product",
-          attributes: ["id", "name", "sku"],
-        },
-        {
-          model: Branch,
-          as: "branch",
-          attributes: ["id", "name", "code"],
-        },
-      ],
-    });
-
-    // Socket emissions
-    emitStockUpdate(activeBranchId, {
-      productId,
-      newStock: quantityAfter,
-    });
-
-    if (quantityAfter <= branchStock.reorderPoint) {
-      emitLowStockAlert(activeBranchId, {
-        id: productId,
-        name: stockWithDetails.product.name,
-        sku: stockWithDetails.product.sku,
-        currentStock: quantityAfter,
-        reorderPoint: branchStock.reorderPoint,
-        minimumStock: branchStock.minimumStock,
-        branchId: activeBranchId,
-      });
-    }
-
+    emitStockUpdate(activeBranchId, { productId, newStock: quantityAfter });
+    maybeEmitLowStock(activeBranchId, branchStock, stock.product, quantityAfter);
     emitDashboardRefresh(activeBranchId);
 
-    return res.status(201).json(stockWithDetails);
+    return res.status(201).json(stock);
   } catch (error) {
     console.error("Error recording stock loss:", error);
-    return res.status(500).json({
-      message: "Server error",
-      error: error.message,
-    });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// Get low stock products
+// ─── Get Low Stock Products ───────────────────────────────────────────────────
+
 exports.getLowStockProducts = async (req, res) => {
   try {
     const { activeBranchId, canViewAllBranches } = await getUserActiveBranch(req.user.id);
 
-    const whereClause = {
-      [Op.or]: [
-        { currentStock: 0 },
-        sequelize.literal('"BranchStock"."currentStock" <= "BranchStock"."reorderPoint"'),
-      ],
-    };
+    let query = supabase
+      .from("branch_stocks")
+      .select(`
+        *,
+        product:products!inner (id, name, sku, price, status),
+        branch:branches (id, name, code)
+      `)
+      .eq("product.status", "ACTIVE")
+      .order("current_stock", { ascending: true });
 
-    // Filter by branch if not viewing all
     if (!canViewAllBranches && activeBranchId) {
-      whereClause.branchId = activeBranchId;
+      query = query.eq("branch_id", activeBranchId);
     }
 
-    // ✅ QUERY BRANCH_STOCKS TABLE
-    const lowStockItems = await BranchStock.findAll({
-      where: whereClause,
-      include: [
-        {
-          model: Product,
-          as: "product",
-          where: { status: "ACTIVE" },
-          attributes: ["id", "name", "sku", "price"],
-        },
-        {
-          model: Branch,
-          as: "branch",
-          attributes: ["id", "name", "code"],
-        },
-      ],
-      order: [["currentStock", "ASC"]],
-    });
+    const { data: allStocks, error } = await query;
+    if (error) throw error;
 
-    // Format response
+    // Column-to-column comparison done in JS
+    const lowStockItems = allStocks.filter(
+      (bs) => bs.current_stock === 0 || bs.current_stock <= bs.reorder_point
+    );
+
     const formatted = lowStockItems.map((item) => ({
-      id: item.product.id,
-      name: item.product.name,
-      sku: item.product.sku,
-      currentStock: item.currentStock,
-      minimumStock: item.minimumStock,
-      reorderPoint: item.reorderPoint,
-      price: parseFloat(item.product.price),
-      branchId: item.branchId,
-      branchName: item.branch?.name,
-      branchCode: item.branch?.code,
+      id:           item.product.id,
+      name:         item.product.name,
+      sku:          item.product.sku,
+      currentStock: item.current_stock,
+      minimumStock: item.minimum_stock,
+      reorderPoint: item.reorder_point,
+      price:        parseFloat(item.product.price),
+      branchId:     item.branch_id,
+      branchName:   item.branch?.name,
+      branchCode:   item.branch?.code,
     }));
 
     return res.status(200).json(formatted);
   } catch (error) {
     console.error("Error fetching low stock products:", error);
-    return res.status(500).json({
-      message: "Server error",
-      error: error.message,
-    });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// Get stock summary/statistics
+// ─── Get Stock Summary ────────────────────────────────────────────────────────
+
 exports.getStockSummary = async (req, res) => {
   try {
     const { activeBranchId, canViewAllBranches } = await getUserActiveBranch(req.user.id);
 
-    const whereClause = {};
-
-    // Filter by branch if not viewing all
-    if (!canViewAllBranches && activeBranchId) {
-      whereClause.branchId = activeBranchId;
-    }
-
-    // ✅ QUERY BRANCH_STOCKS TABLE
-    const branchStocks = await BranchStock.findAll({
-      where: whereClause,
-      include: [
-        {
-          model: Product,
-          as: "product",
-          where: { status: "ACTIVE" },
-          attributes: [],
-        },
-      ],
-    });
-
-    // Calculate summary
-    const totalProducts = new Set(branchStocks.map((bs) => bs.productId)).size;
-    const outOfStock = branchStocks.filter((bs) => bs.currentStock === 0).length;
-    const lowStock = branchStocks.filter(
-      (bs) => bs.currentStock > 0 && bs.currentStock <= bs.reorderPoint,
-    ).length;
-    const criticalStock = branchStocks.filter(
-      (bs) => bs.currentStock > 0 && bs.currentStock <= bs.minimumStock,
-    ).length;
-
-    // Recent transactions
-    const transactionsWhere = {
-      createdAt: {
-        [Op.gte]: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000),
-      },
-    };
+    let stockQuery = supabase
+      .from("branch_stocks")
+      .select(`
+        product_id, branch_id, current_stock, minimum_stock, reorder_point,
+        product:products!inner (status)
+      `)
+      .eq("product.status", "ACTIVE");
 
     if (!canViewAllBranches && activeBranchId) {
-      transactionsWhere.branchId = activeBranchId;
+      stockQuery = stockQuery.eq("branch_id", activeBranchId);
     }
 
-    const recentTransactions = await Stock.count({
-      where: transactionsWhere,
-    });
+    const { data: branchStocks, error: stockError } = await stockQuery;
+    if (stockError) throw stockError;
+
+    // Column-to-column comparisons in JS
+    const totalProducts  = new Set(branchStocks.map((bs) => bs.product_id)).size;
+    const outOfStock     = branchStocks.filter((bs) => bs.current_stock === 0).length;
+    const lowStock       = branchStocks.filter((bs) => bs.current_stock > 0 && bs.current_stock <= bs.reorder_point).length;
+    const criticalStock  = branchStocks.filter((bs) => bs.current_stock > 0 && bs.current_stock <= bs.minimum_stock).length;
+
+    // Recent transactions count (last 7 days)
+    const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+
+    let txQuery = supabase
+      .from("stocks")
+      .select("id", { count: "exact", head: true })
+      .gte("created_at", sevenDaysAgo);
+
+    if (!canViewAllBranches && activeBranchId) {
+      txQuery = txQuery.eq("branch_id", activeBranchId);
+    }
+
+    const { count: recentTransactions, error: txError } = await txQuery;
+    if (txError) throw txError;
 
     return res.status(200).json({
       totalProducts,
@@ -622,9 +476,6 @@ exports.getStockSummary = async (req, res) => {
     });
   } catch (error) {
     console.error("Error fetching stock summary:", error);
-    return res.status(500).json({
-      message: "Server error",
-      error: error.message,
-    });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };

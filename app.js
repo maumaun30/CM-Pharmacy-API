@@ -15,27 +15,23 @@ const dashboardRoutes = require("./routes/dashboardRoutes");
 
 const { initializeSocket } = require("./utils/socket");
 
-// Load environment variables
 dotenv.config();
 
 const app = express();
 const server = http.createServer(app);
 
-const io = initializeSocket(server);
+initializeSocket(server);
 
-// Middleware
 app.use(
   cors({
     origin: process.env.CLIENT_URL || "http://localhost:3000",
     credentials: true,
-  }),
+  })
 );
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-// Routes
 app.use("/api/auth", authRoutes);
-
 app.use("/api/categories", categoryRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/discounts", discountRoutes);
@@ -46,12 +42,10 @@ app.use("/api/branches", branchRoutes);
 app.use("/api/logs", logRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 
-// Basic route
 app.get("/", (req, res) => {
   res.json({ message: "Welcome to Pharmacy POS API" });
 });
 
-// Error handling middleware
 app.use((err, req, res, next) => {
   console.error(err.stack);
   res.status(500).json({

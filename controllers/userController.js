@@ -1,13 +1,26 @@
-const { User } = require("../models");
 const bcrypt = require("bcryptjs");
+const supabase = require("../config/supabase");
 const { createLog } = require("../middleware/logMiddleware");
 
-// Admin only: Get all users
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+const PUBLIC_FIELDS = `
+  id, username, email, role,
+  first_name, last_name, contact_number,
+  branch_id, current_branch_id,
+  is_active, created_at, updated_at
+`;
+
+// ─── Get All Users ────────────────────────────────────────────────────────────
+
 exports.getAllUsers = async (req, res) => {
   try {
-    const users = await User.findAll({
-      attributes: { exclude: ["password"] },
-    });
+    const { data: users, error } = await supabase
+      .from("users")
+      .select(PUBLIC_FIELDS)
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
 
     return res.status(200).json(users);
   } catch (error) {
@@ -16,6 +29,8 @@ exports.getAllUsers = async (req, res) => {
       .json({ message: "Server error", error: error.message });
   }
 };
+
+// ─── Create User ──────────────────────────────────────────────────────────────
 
 exports.createUser = async (req, res) => {
   try {
@@ -31,15 +46,7 @@ exports.createUser = async (req, res) => {
       pin,
     } = req.body;
 
-    const hashedPassword = await bcrypt.hash("staff123", 10);
-
-    // Check if email already exists
-    const existingEmail = await User.findOne({ where: { email } });
-    if (existingEmail) {
-      return res.status(400).json({ message: "Email already in use" });
-    }
-
-    // Validate required fields
+    // Validate required fields first
     if (!username || !email || !role || isActive === undefined) {
       return res.status(400).json({
         message:
@@ -47,18 +54,53 @@ exports.createUser = async (req, res) => {
       });
     }
 
-    const newUser = await User.create({
-      username,
-      email,
-      password: hashedPassword,
-      role,
-      firstName,
-      lastName,
-      contactNumber,
-      isActive,
-      branchId,
-      pin: pin || null,
-    });
+    // Check duplicate email
+    const { data: existingEmail } = await supabase
+      .from("users")
+      .select("id")
+      .eq("email", email)
+      .maybeSingle();
+
+    if (existingEmail) {
+      return res.status(400).json({ message: "Email already in use" });
+    }
+
+    // Check duplicate username
+    const { data: existingUsername } = await supabase
+      .from("users")
+      .select("id")
+      .eq("username", username)
+      .maybeSingle();
+
+    if (existingUsername) {
+      return res.status(400).json({ message: "Username already in use" });
+    }
+
+    const hashedPassword = await bcrypt.hash("staff123", 10);
+
+    let hashedPin = null;
+    if (pin) {
+      hashedPin = await bcrypt.hash(String(pin), 10);
+    }
+
+    const { data: newUser, error } = await supabase
+      .from("users")
+      .insert({
+        username,
+        email,
+        password: hashedPassword,
+        role,
+        first_name: firstName,
+        last_name: lastName,
+        contact_number: contactNumber,
+        is_active: isActive,
+        branch_id: branchId || null,
+        pin: hashedPin,
+      })
+      .select(PUBLIC_FIELDS)
+      .single();
+
+    if (error) throw error;
 
     await createLog(
       req,
@@ -66,7 +108,7 @@ exports.createUser = async (req, res) => {
       "users",
       newUser.id,
       `Created user: ${newUser.username}`,
-      { user: newUser.toJSON() },
+      { user: newUser }
     );
 
     return res.status(201).json({
@@ -80,14 +122,20 @@ exports.createUser = async (req, res) => {
   }
 };
 
+// ─── Delete User ──────────────────────────────────────────────────────────────
+
 exports.deleteUser = async (req, res) => {
   try {
     const userId = req.params.id;
 
-    const user = await User.findByPk(userId);
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
+    const { data: user, error: fetchError } = await supabase
+      .from("users")
+      .select("id, username")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (fetchError) throw fetchError;
+    if (!user) return res.status(404).json({ message: "User not found" });
 
     if (req.user.id === user.id) {
       return res
@@ -95,7 +143,12 @@ exports.deleteUser = async (req, res) => {
         .json({ message: "You cannot delete your own account" });
     }
 
-    await user.destroy();
+    const { error: deleteError } = await supabase
+      .from("users")
+      .delete()
+      .eq("id", userId);
+
+    if (deleteError) throw deleteError;
 
     await createLog(
       req,
@@ -103,12 +156,10 @@ exports.deleteUser = async (req, res) => {
       "users",
       userId,
       `Deleted user: ${user.username}`,
-      { user: user.toJSON() },
+      { user }
     );
 
-    return res.status(200).json({
-      message: "User deleted successfully",
-    });
+    return res.status(200).json({ message: "User deleted successfully" });
   } catch (error) {
     return res
       .status(500)
@@ -116,7 +167,8 @@ exports.deleteUser = async (req, res) => {
   }
 };
 
-// Admin only: Update user (including role)
+// ─── Update User ──────────────────────────────────────────────────────────────
+
 exports.updateUser = async (req, res) => {
   try {
     const {
@@ -128,60 +180,75 @@ exports.updateUser = async (req, res) => {
       contactNumber,
       isActive,
       branchId,
+      pin,
     } = req.body;
     const userId = req.params.id;
 
-    const user = await User.findByPk(userId);
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
+    // Fetch existing user for comparison
+    const { data: user, error: fetchError } = await supabase
+      .from("users")
+      .select(PUBLIC_FIELDS)
+      .eq("id", userId)
+      .maybeSingle();
 
-    // Check if email already exists
+    if (fetchError) throw fetchError;
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    // Check email uniqueness
     if (email && email !== user.email) {
-      const existingEmail = await User.findOne({ where: { email } });
-      if (existingEmail) {
-        return res.status(400).json({ message: "Email already in use" });
-      }
+      const { data: taken } = await supabase
+        .from("users")
+        .select("id")
+        .eq("email", email)
+        .maybeSingle();
+      if (taken) return res.status(400).json({ message: "Email already in use" });
     }
 
-    // Update fields
-    if (username) user.username = username;
-    if (email) user.email = email;
-    if (role) user.role = role;
-    if (firstName) user.firstName = firstName;
-    if (lastName) user.lastName = lastName;
-    if (contactNumber) user.contactNumber = contactNumber;
-    if (isActive !== undefined) user.isActive = isActive;
-    if (branchId) user.branchId = branchId;
-    if (pin !== undefined) user.pin = pin || null;
+    // Check username uniqueness
+    if (username && username !== user.username) {
+      const { data: taken } = await supabase
+        .from("users")
+        .select("id")
+        .eq("username", username)
+        .maybeSingle();
+      if (taken) return res.status(400).json({ message: "Username already taken" });
+    }
 
-    await user.save();
+    // Build update payload — only include fields that were sent
+    const updates = {};
+    if (username !== undefined) updates.username = username;
+    if (email !== undefined) updates.email = email;
+    if (role !== undefined) updates.role = role;
+    if (firstName !== undefined) updates.first_name = firstName;
+    if (lastName !== undefined) updates.last_name = lastName;
+    if (contactNumber !== undefined) updates.contact_number = contactNumber;
+    if (isActive !== undefined) updates.is_active = isActive;
+    if (branchId !== undefined) updates.branch_id = branchId || null;
+    if (pin !== undefined) {
+      updates.pin = pin ? await bcrypt.hash(String(pin), 10) : null;
+    }
+
+    const { data: updatedUser, error: updateError } = await supabase
+      .from("users")
+      .update(updates)
+      .eq("id", userId)
+      .select(PUBLIC_FIELDS)
+      .single();
+
+    if (updateError) throw updateError;
 
     await createLog(
       req,
       "UPDATE",
       "users",
       userId,
-      `Updated user: ${user.username}`,
-      {
-        before: { ...user._previousDataValues },
-        after: { ...user.toJSON() },
-      },
+      `Updated user: ${updatedUser.username}`,
+      { before: user, after: updatedUser }
     );
 
     return res.status(200).json({
       message: "User updated successfully",
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-        firstName: user.firstName,
-        lastName: user.lastName,
-        contactNumber: user.contactNumber,
-        isActive: user.isActive,
-        branchId: user.branchId,
-      },
+      user: updatedUser,
     });
   } catch (error) {
     return res

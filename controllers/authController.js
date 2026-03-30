@@ -1,55 +1,71 @@
 const jwt = require("jsonwebtoken");
-const { User, Branch } = require("../models");
+const bcrypt = require("bcryptjs");
+const supabase = require("../config/supabase");
 const { createLog } = require("../middleware/logMiddleware");
 
-// Register new user
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+const signToken = (user) =>
+  jwt.sign(
+    { id: user.id, username: user.username, role: user.role },
+    process.env.JWT_SECRET,
+    { expiresIn: process.env.JWT_EXPIRES_IN }
+  );
+
+const safeUser = (user) => ({
+  id: user.id,
+  username: user.username,
+  email: user.email,
+  role: user.role,
+});
+
+// ─── Register ────────────────────────────────────────────────────────────────
+
 exports.register = async (req, res) => {
   try {
     const { username, email, password, role } = req.body;
 
-    // Basic validation
     if (!username || !email || !password) {
       return res
         .status(400)
         .json({ message: "Username, email, and password are required" });
     }
 
-    // Check if username or email already exists
-    const existingUser = await User.findOne({
-      where: {
-        [User.sequelize.Op.or]: [{ username }, { email }],
-      },
-    });
+    // Check duplicate username or email
+    const { data: existing } = await supabase
+      .from("users")
+      .select("id")
+      .or(`username.eq.${username},email.eq.${email}`)
+      .maybeSingle();
 
-    if (existingUser) {
+    if (existing) {
       return res
         .status(400)
         .json({ message: "Username or email already in use" });
     }
 
-    // Create new user - the password will be hashed by model hooks
-    const newUser = await User.create({
-      username,
-      email,
-      password,
-      role: role || "cashier",
-    });
+    const salt = await bcrypt.genSalt(10);
+    const hashedPassword = await bcrypt.hash(password, salt);
 
-    // Create JWT token
-    const token = jwt.sign(
-      { id: newUser.id, username: newUser.username, role: newUser.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN },
-    );
+    const { data: newUser, error } = await supabase
+      .from("users")
+      .insert({
+        username,
+        email,
+        password: hashedPassword,
+        role: role || "cashier",
+        is_active: true,
+      })
+      .select("id, username, email, role")
+      .single();
+
+    if (error) throw error;
+
+    const token = signToken(newUser);
 
     return res.status(201).json({
       message: "User registered successfully",
-      user: {
-        id: newUser.id,
-        username: newUser.username,
-        email: newUser.email,
-        role: newUser.role,
-      },
+      user: safeUser(newUser),
       token,
     });
   } catch (error) {
@@ -59,41 +75,40 @@ exports.register = async (req, res) => {
   }
 };
 
-// Login user
+// ─── Login ───────────────────────────────────────────────────────────────────
+
 exports.login = async (req, res) => {
   try {
     const { username, password } = req.body;
 
-    // Validate input
     if (!username || !password) {
       return res
         .status(400)
         .json({ message: "Username and password are required" });
     }
 
-    // Find user by username
-    const user = await User.findOne({
-      where: { username },
-    });
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("username", username)
+      .maybeSingle();
 
-    // Check if user exists and password is correct
-    if (!user || !(await user.validatePassword(password))) {
+    if (error) throw error;
+
+    const validPassword =
+      user && (await bcrypt.compare(password, user.password));
+
+    if (!user || !validPassword) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    // Check if user is active
-    if (!user.isActive) {
+    if (!user.is_active) {
       return res
         .status(401)
         .json({ message: "Account is inactive. Contact administrator." });
     }
 
-    // Create JWT token
-    const token = jwt.sign(
-      { id: user.id, username: user.username, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN },
-    );
+    const token = signToken(user);
 
     await createLog(
       req,
@@ -101,17 +116,12 @@ exports.login = async (req, res) => {
       "auth",
       user.id,
       `User ${user.username} logged in`,
-      { role: user.role },
+      { role: user.role }
     );
 
     return res.status(200).json({
       message: "Login successful",
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-      },
+      user: safeUser(user),
       token,
     });
   } catch (error) {
@@ -121,16 +131,18 @@ exports.login = async (req, res) => {
   }
 };
 
-// Get current user profile
+// ─── Get Profile ─────────────────────────────────────────────────────────────
+
 exports.getProfile = async (req, res) => {
   try {
-    const user = await User.findByPk(req.user.id, {
-      attributes: { exclude: ["password"] },
-    });
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("id, username, email, role, first_name, last_name, contact_number, branch_id, current_branch_id, is_active, created_at, updated_at")
+      .eq("id", req.user.id)
+      .maybeSingle();
 
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
+    if (error) throw error;
+    if (!user) return res.status(404).json({ message: "User not found" });
 
     return res.status(200).json(user);
   } catch (error) {
@@ -140,60 +152,71 @@ exports.getProfile = async (req, res) => {
   }
 };
 
-// Update user profile
+// ─── Update Profile ───────────────────────────────────────────────────────────
+
 exports.updateProfile = async (req, res) => {
   try {
     const { username, email, password } = req.body;
     const userId = req.user.id;
 
-    const user = await User.findByPk(userId);
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
+    const { data: user, error: fetchError } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", userId)
+      .maybeSingle();
 
-    // Check if username already exists (if changing)
+    if (fetchError) throw fetchError;
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    // Check username uniqueness
     if (username && username !== user.username) {
-      const existingUsername = await User.findOne({ where: { username } });
-      if (existingUsername) {
-        return res.status(400).json({ message: "Username already taken" });
-      }
+      const { data: taken } = await supabase
+        .from("users")
+        .select("id")
+        .eq("username", username)
+        .maybeSingle();
+      if (taken) return res.status(400).json({ message: "Username already taken" });
     }
 
-    // Check if email already exists
+    // Check email uniqueness
     if (email && email !== user.email) {
-      const existingEmail = await User.findOne({ where: { email } });
-      if (existingEmail) {
-        return res.status(400).json({ message: "Email already in use" });
-      }
+      const { data: taken } = await supabase
+        .from("users")
+        .select("id")
+        .eq("email", email)
+        .maybeSingle();
+      if (taken) return res.status(400).json({ message: "Email already in use" });
     }
 
-    // Update fields
-    if (username) user.username = username;
-    if (email) user.email = email;
-    if (password) user.password = password;
+    const updates = {};
+    if (username) updates.username = username;
+    if (email) updates.email = email;
+    if (password) {
+      const salt = await bcrypt.genSalt(10);
+      updates.password = await bcrypt.hash(password, salt);
+    }
 
-    await user.save();
+    const { data: updatedUser, error: updateError } = await supabase
+      .from("users")
+      .update(updates)
+      .eq("id", userId)
+      .select("id, username, email, role")
+      .single();
+
+    if (updateError) throw updateError;
 
     await createLog(
       req,
       "UPDATE",
       "auth",
-      user.id,
-      `Updated user: ${user.username}`,
-      {
-        before: { ...user._previousDataValues },
-        after: { ...user.toJSON() },
-      },
+      userId,
+      `Updated user: ${updatedUser.username}`,
+      { before: safeUser(user), after: safeUser(updatedUser) }
     );
 
     return res.status(200).json({
       message: "Profile updated successfully",
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-      },
+      user: safeUser(updatedUser),
     });
   } catch (error) {
     return res
@@ -202,31 +225,37 @@ exports.updateProfile = async (req, res) => {
   }
 };
 
+// ─── Switch Branch ────────────────────────────────────────────────────────────
+
 exports.switchBranch = async (req, res) => {
   try {
     const { branchId } = req.body;
     const userId = req.user.id;
 
-    // Only admins can switch branches
     if (req.user.role !== "admin") {
-      return res.status(403).json({
-        message: "Only admins can switch branches",
-      });
+      return res
+        .status(403)
+        .json({ message: "Only admins can switch branches" });
     }
 
-    // Verify branch exists and is active
-    const branch = await Branch.findOne({
-      where: { id: branchId, isActive: true },
-    });
+    const { data: branch, error: branchError } = await supabase
+      .from("branches")
+      .select("*")
+      .eq("id", branchId)
+      .eq("is_active", true)
+      .maybeSingle();
 
+    if (branchError) throw branchError;
     if (!branch) {
-      return res.status(404).json({
-        message: "Branch not found or inactive",
-      });
+      return res.status(404).json({ message: "Branch not found or inactive" });
     }
 
-    // Update current branch
-    await User.update({ currentBranchId: branchId }, { where: { id: userId } });
+    const { error } = await supabase
+      .from("users")
+      .update({ current_branch_id: branchId })
+      .eq("id", userId);
+
+    if (error) throw error;
 
     await createLog(
       req,
@@ -234,7 +263,7 @@ exports.switchBranch = async (req, res) => {
       "users",
       userId,
       `Switched to branch: ${branch.name}`,
-      { branchId, branchName: branch.name },
+      { branchId, branchName: branch.name }
     );
 
     return res.status(200).json({
@@ -243,100 +272,106 @@ exports.switchBranch = async (req, res) => {
     });
   } catch (error) {
     console.error("Error switching branch:", error);
-    return res.status(500).json({
-      message: "Server error",
-      error: error.message,
-    });
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
   }
 };
+
+// ─── Reset to Home Branch ─────────────────────────────────────────────────────
 
 exports.resetToBranchHome = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    await User.update({ currentBranchId: null }, { where: { id: userId } });
+    const { error } = await supabase
+      .from("users")
+      .update({ current_branch_id: null })
+      .eq("id", userId);
 
-    return res.status(200).json({
-      message: "Reset to home branch",
-    });
+    if (error) throw error;
+
+    return res.status(200).json({ message: "Reset to home branch" });
   } catch (error) {
     console.error("Error resetting branch:", error);
-    return res.status(500).json({
-      message: "Server error",
-      error: error.message,
-    });
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
   }
 };
+
+// ─── Get Current User (with branch joins) ────────────────────────────────────
 
 exports.getCurrentUser = async (req, res) => {
   try {
-    const user = await User.findByPk(req.user.id, {
-      attributes: {
-        exclude: ["password"], // Don't send password
-      },
-      include: [
-        {
-          model: Branch,
-          as: "branch",
-          attributes: ["id", "name", "code", "isActive", "email", "phone"],
-          required: false, // LEFT JOIN - user might not have a branch
-        },
-        {
-          model: Branch,
-          as: "currentBranch",
-          attributes: ["id", "name", "code", "isActive", "email", "phone"],
-          required: false,
-        },
-      ],
-    });
+    // Supabase foreign key joins — requires FK relationships set up in Supabase dashboard
+    const { data: user, error } = await supabase
+      .from("users")
+      .select(`
+        id, username, email, role,
+        first_name, last_name, contact_number,
+        branch_id, current_branch_id,
+        is_active, created_at, updated_at,
+        branch:branches!users_branch_id_fkey (
+          id, name, code, is_active, email, phone
+        ),
+        currentBranch:branches!users_current_branch_id_fkey (
+          id, name, code, is_active, email, phone
+        )
+      `)
+      .eq("id", req.user.id)
+      .maybeSingle();
 
-    if (!user) {
-      return res.status(404).json({ message: "User not found" });
-    }
+    if (error) throw error;
+    if (!user) return res.status(404).json({ message: "User not found" });
 
-    // Convert to JSON and clean up
-    const userData = user.toJSON();
-
-    return res.status(200).json(userData);
+    return res.status(200).json(user);
   } catch (error) {
     console.error("Error fetching current user:", error);
-    return res.status(500).json({
-      message: "Server error",
-      error: error.message,
-    });
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
   }
 };
 
-// Add this new export to authController.js
+// ─── Login With PIN ───────────────────────────────────────────────────────────
+
 exports.loginWithPin = async (req, res) => {
   try {
     const { username, pin } = req.body;
 
     if (!username || !pin) {
-      return res.status(400).json({ message: "Username and PIN are required" });
+      return res
+        .status(400)
+        .json({ message: "Username and PIN are required" });
     }
 
     if (!/^\d{4,6}$/.test(pin)) {
       return res.status(400).json({ message: "PIN must be 4–6 digits" });
     }
 
-    const user = await User.findOne({ where: { username } });
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("username", username)
+      .maybeSingle();
 
-    if (!user || !(await user.validatePin(pin))) {
+    if (error) throw error;
+
+    const validPin =
+      user && user.pin && (await bcrypt.compare(pin, user.pin));
+
+    if (!user || !validPin) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    if (!user.isActive) {
+    if (!user.is_active) {
       return res
         .status(401)
         .json({ message: "Account is inactive. Contact administrator." });
     }
 
-    const token = jwt.sign(
-      { id: user.id, username: user.username, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRES_IN },
-    );
+    const token = signToken(user);
 
     await createLog(
       req,
@@ -344,17 +379,12 @@ exports.loginWithPin = async (req, res) => {
       "auth",
       user.id,
       `User ${user.username} logged in via PIN`,
-      { role: user.role },
+      { role: user.role }
     );
 
     return res.status(200).json({
       message: "Login successful",
-      user: {
-        id: user.id,
-        username: user.username,
-        email: user.email,
-        role: user.role,
-      },
+      user: safeUser(user),
       token,
     });
   } catch (error) {
@@ -364,7 +394,8 @@ exports.loginWithPin = async (req, res) => {
   }
 };
 
-// Update setPin (for profile/account settings use)
+// ─── Set PIN ──────────────────────────────────────────────────────────────────
+
 exports.setPin = async (req, res) => {
   try {
     const { pin } = req.body;
@@ -374,18 +405,34 @@ exports.setPin = async (req, res) => {
       return res.status(400).json({ message: "PIN must be 4–6 digits" });
     }
 
-    const user = await User.findByPk(userId);
+    const { data: user, error: fetchError } = await supabase
+      .from("users")
+      .select("id, username")
+      .eq("id", userId)
+      .maybeSingle();
+
+    if (fetchError) throw fetchError;
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    user.pin = pin || null; // null clears the PIN
-    await user.save();
+    let hashedPin = null;
+    if (pin) {
+      const salt = await bcrypt.genSalt(10);
+      hashedPin = await bcrypt.hash(pin, salt);
+    }
+
+    const { error: updateError } = await supabase
+      .from("users")
+      .update({ pin: hashedPin })
+      .eq("id", userId);
+
+    if (updateError) throw updateError;
 
     await createLog(
       req,
       "UPDATE",
       "auth",
       userId,
-      `User ${user.username} ${pin ? "set" : "removed"} PIN`,
+      `User ${user.username} ${pin ? "set" : "removed"} PIN`
     );
 
     return res

@@ -1,43 +1,44 @@
-const { Category, Product } = require("../models");
+const supabase = require("../config/supabase");
 const { createLog } = require("../middleware/logMiddleware");
 
-// Get all categories
+// ─── Get All Categories ───────────────────────────────────────────────────────
+
 exports.getAllCategories = async (req, res) => {
   try {
-    const categories = await Category.findAll();
+    const { data: categories, error } = await supabase
+      .from("categories")
+      .select("*")
+      .order("name", { ascending: true });
+
+    if (error) throw error;
+
     return res.status(200).json(categories);
   } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Server error", error: error.message });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// Get category by ID
+// ─── Get Category By ID (with products) ──────────────────────────────────────
+
 exports.getCategoryById = async (req, res) => {
   try {
-    const category = await Category.findByPk(req.params.id, {
-      include: [
-        {
-          model: Product,
-          as: "products",
-        },
-      ],
-    });
+    const { data: category, error } = await supabase
+      .from("categories")
+      .select(`*, products (*)`)
+      .eq("id", req.params.id)
+      .maybeSingle();
 
-    if (!category) {
-      return res.status(404).json({ message: "Category not found" });
-    }
+    if (error) throw error;
+    if (!category) return res.status(404).json({ message: "Category not found" });
 
     return res.status(200).json(category);
   } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Server error", error: error.message });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// Create new category
+// ─── Create Category ──────────────────────────────────────────────────────────
+
 exports.createCategory = async (req, res) => {
   try {
     const { name, description } = req.body;
@@ -46,117 +47,133 @@ exports.createCategory = async (req, res) => {
       return res.status(400).json({ message: "Category name is required" });
     }
 
-    // Check if category already exists
-    const existingCategory = await Category.findOne({ where: { name } });
-    if (existingCategory) {
-      return res
-        .status(400)
-        .json({ message: "Category with this name already exists" });
+    const { data: existing } = await supabase
+      .from("categories")
+      .select("id")
+      .eq("name", name)
+      .maybeSingle();
+
+    if (existing) {
+      return res.status(400).json({ message: "Category with this name already exists" });
     }
 
-    const newCategory = await Category.create({
-      name,
-      description,
-    });
+    const { data: newCategory, error } = await supabase
+      .from("categories")
+      .insert({ name, description })
+      .select()
+      .single();
+
+    if (error) throw error;
 
     await createLog(
-      req,
-      "CREATE",
-      "categories",
+      req, "CREATE", "categories", newCategory.id,
       `Created category: ${newCategory.name}`,
-      {
-        category: newCategory.toJSON(),
-      },
+      { category: newCategory }
     );
 
     return res.status(201).json(newCategory);
   } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Server error", error: error.message });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// Update category
+// ─── Update Category ──────────────────────────────────────────────────────────
+
 exports.updateCategory = async (req, res) => {
   try {
     const { name, description } = req.body;
     const categoryId = req.params.id;
 
-    const category = await Category.findByPk(categoryId);
-    if (!category) {
-      return res.status(404).json({ message: "Category not found" });
-    }
+    const { data: category, error: fetchError } = await supabase
+      .from("categories")
+      .select("*")
+      .eq("id", categoryId)
+      .maybeSingle();
 
-    // Check if updated name already exists (and isn't the current category)
+    if (fetchError) throw fetchError;
+    if (!category) return res.status(404).json({ message: "Category not found" });
+
     if (name && name !== category.name) {
-      const existingCategory = await Category.findOne({ where: { name } });
-      if (existingCategory) {
-        return res
-          .status(400)
-          .json({ message: "Category with this name already exists" });
+      const { data: existing } = await supabase
+        .from("categories")
+        .select("id")
+        .eq("name", name)
+        .maybeSingle();
+
+      if (existing) {
+        return res.status(400).json({ message: "Category with this name already exists" });
       }
     }
 
-    await category.update({
-      name: name || category.name,
-      description:
-        description !== undefined ? description : category.description,
-    });
+    const updates = {
+      name:        name        ?? category.name,
+      description: description !== undefined ? description : category.description,
+    };
+
+    const { data: updatedCategory, error: updateError } = await supabase
+      .from("categories")
+      .update(updates)
+      .eq("id", categoryId)
+      .select()
+      .single();
+
+    if (updateError) throw updateError;
 
     await createLog(
-      req,
-      "UPDATE",
-      "categories",
-      `Updated category: ${category.name}`,
-      {
-        before: { ...category._previousDataValues },
-        after: { ...category.toJSON() },
-      },
+      req, "UPDATE", "categories", categoryId,
+      `Updated category: ${updatedCategory.name}`,
+      { before: category, after: updatedCategory }
     );
 
-    return res.status(200).json(category);
+    return res.status(200).json(updatedCategory);
   } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Server error", error: error.message });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// Delete category
+// ─── Delete Category ──────────────────────────────────────────────────────────
+
 exports.deleteCategory = async (req, res) => {
   try {
     const categoryId = req.params.id;
 
-    const category = await Category.findByPk(categoryId);
-    if (!category) {
-      return res.status(404).json({ message: "Category not found" });
-    }
+    const { data: category, error: fetchError } = await supabase
+      .from("categories")
+      .select("id, name")
+      .eq("id", categoryId)
+      .maybeSingle();
 
-    // Check if category has products
-    const productCount = await Product.count({ where: { categoryId } });
+    if (fetchError) throw fetchError;
+    if (!category) return res.status(404).json({ message: "Category not found" });
+
+    const { count: productCount, error: countError } = await supabase
+      .from("products")
+      .select("id", { count: "exact", head: true })
+      .eq("category_id", categoryId);
+
+    if (countError) throw countError;
+
     if (productCount > 0) {
       return res.status(400).json({
-        message:
-          "Cannot delete category with associated products. Remove products first.",
+        message: "Cannot delete category with associated products. Remove products first.",
       });
     }
 
-    await category.destroy();
+    const { error: deleteError } = await supabase
+      .from("categories")
+      .delete()
+      .eq("id", categoryId);
+
+    if (deleteError) throw deleteError;
 
     await createLog(
-      req,
-      "DELETE",
-      "categories",
-      categoryId,
+      req, "DELETE", "categories", categoryId,
       `Deleted category: ${category.name}`,
-      { category: category.toJSON() },
+      { category }
     );
 
     return res.status(200).json({ message: "Category deleted successfully" });
   } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Server error", error: error.message });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };

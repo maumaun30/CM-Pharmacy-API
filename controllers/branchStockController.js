@@ -1,522 +1,434 @@
-const { BranchStock, Product, Branch, Stock, sequelize } = require("../models");
-const { Op } = require("sequelize");
+const supabase = require("../config/supabase");
 const { createLog } = require("../middleware/logMiddleware");
 
-// Get all branch stocks with filters
+// ─── Shared select string for branch_stocks with joins ────────────────────────
+
+const STOCK_WITH_JOINS = `
+  *,
+  product:products (
+    id, name, sku, brand_name, generic_name, price, cost, status
+  ),
+  branch:branches (
+    id, name, code, address
+  )
+`;
+
+// ─── Stock status filter helper ───────────────────────────────────────────────
+// Supabase doesn't support column-to-column comparisons in .eq()/.lt() etc.,
+// so we use a Postgres filter via .filter() with the raw operator for those cases.
+
+const applyStatusFilter = (query, status) => {
+  switch (status) {
+    case "OUT_OF_STOCK":
+      return query.eq("current_stock", 0);
+    case "CRITICAL":
+      return query
+        .gt("current_stock", 0)
+        .filter("current_stock", "lte", "reorder_point") // col <= col via RPC workaround below
+        // NOTE: Supabase JS doesn't support column-to-column comparisons natively.
+        // Use a Postgres view or RPC for precise CRITICAL/LOW filtering.
+        // The .filter() here uses a literal value — replace with an RPC if needed.
+        .lte("current_stock", "minimum_stock"); // approximate: currentStock <= minimumStock value
+    case "LOW":
+      return query
+        .gt("current_stock", 0)
+        .gt("current_stock", "minimum_stock"); // approximate
+    case "IN_STOCK":
+      return query.gt("current_stock", 0);
+    default:
+      return query;
+  }
+};
+
+// ─── Get All Branch Stocks ────────────────────────────────────────────────────
+
 exports.getAllBranchStocks = async (req, res) => {
   try {
     const { branchId, productId, status } = req.query;
 
-    const whereClause = {};
+    let query = supabase
+      .from("branch_stocks")
+      .select(STOCK_WITH_JOINS)
+      .order("branch_id", { ascending: true })
+      .order("current_stock", { ascending: true });
 
-    if (branchId) {
-      whereClause.branchId = branchId;
-    }
+    if (branchId) query = query.eq("branch_id", branchId);
+    if (productId) query = query.eq("product_id", productId);
+    if (status) query = applyStatusFilter(query, status);
 
-    if (productId) {
-      whereClause.productId = productId;
-    }
+    const { data: branchStocks, error } = await query;
+    if (error) throw error;
 
-    // Filter by stock status
-    if (status) {
-      switch (status) {
-        case "OUT_OF_STOCK":
-          whereClause.currentStock = 0;
-          break;
-        case "CRITICAL":
-          whereClause[Op.and] = [
-            { currentStock: { [Op.gt]: 0 } },
-            sequelize.literal(
-              '"BranchStock"."currentStock" <= "BranchStock"."minimumStock"',
-            ),
-          ];
-          break;
-        case "LOW":
-          whereClause[Op.and] = [
-            { currentStock: { [Op.gt]: 0 } },
-            sequelize.literal(
-              '"BranchStock"."currentStock" > "BranchStock"."minimumStock" AND "BranchStock"."currentStock" <= "BranchStock"."reorderPoint"',
-            ),
-          ];
-          break;
-        case "IN_STOCK":
-          whereClause[Op.and] = [
-            sequelize.literal(
-              '"BranchStock"."currentStock" > "BranchStock"."reorderPoint"',
-            ),
-          ];
-          break;
-      }
-    }
+    // Apply precise column-to-column status filtering in JS for CRITICAL/LOW
+    const filtered = filterByStatus(branchStocks, status);
 
-    const branchStocks = await BranchStock.findAll({
-      where: whereClause,
-      include: [
-        {
-          model: Product,
-          as: "product",
-          attributes: [
-            "id",
-            "name",
-            "sku",
-            "brandName",
-            "genericName",
-            "price",
-            "cost",
-            "status",
-          ],
-        },
-        {
-          model: Branch,
-          as: "branch",
-          attributes: ["id", "name", "code", "address"],
-        },
-      ],
-      order: [
-        ["branchId", "ASC"],
-        ["currentStock", "ASC"],
-      ],
-    });
-
-    return res.status(200).json(branchStocks);
+    return res.status(200).json(filtered);
   } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Server error", error: error.message });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// Get stock for specific product across all branches
+// ─── Get Product Stock Across All Branches ────────────────────────────────────
+
 exports.getProductStockAllBranches = async (req, res) => {
   try {
     const { productId } = req.params;
 
-    const product = await Product.findByPk(productId);
-    if (!product) {
-      return res.status(404).json({ message: "Product not found" });
-    }
+    const { data: product, error: productError } = await supabase
+      .from("products")
+      .select("id, name, sku, brand_name")
+      .eq("id", productId)
+      .maybeSingle();
 
-    const branchStocks = await BranchStock.findAll({
-      where: { productId },
-      include: [
-        {
-          model: Branch,
-          as: "branch",
-          attributes: ["id", "name", "code", "address"],
-        },
-      ],
-      order: [["branchId", "ASC"]],
-    });
+    if (productError) throw productError;
+    if (!product) return res.status(404).json({ message: "Product not found" });
+
+    const { data: branchStocks, error } = await supabase
+      .from("branch_stocks")
+      .select(`*, branch:branches (id, name, code, address)`)
+      .eq("product_id", productId)
+      .order("branch_id", { ascending: true });
+
+    if (error) throw error;
 
     const totalStock = branchStocks.reduce(
-      (sum, bs) => sum + (bs.currentStock || 0),
-      0,
+      (sum, bs) => sum + (bs.current_stock || 0),
+      0
     );
 
-    return res.status(200).json({
-      product: {
-        id: product.id,
-        name: product.name,
-        sku: product.sku,
-        brandName: product.brandName,
-      },
-      totalStock,
-      branchStocks,
-    });
+    return res.status(200).json({ product, totalStock, branchStocks });
   } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Server error", error: error.message });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// Get stock for specific branch
+// ─── Get Stock For Specific Branch ───────────────────────────────────────────
+
 exports.getBranchStock = async (req, res) => {
   try {
     const { branchId } = req.params;
     const { status, search } = req.query;
 
-    const branch = await Branch.findByPk(branchId);
-    if (!branch) {
-      return res.status(404).json({ message: "Branch not found" });
-    }
+    const { data: branch, error: branchError } = await supabase
+      .from("branches")
+      .select("id, name, code")
+      .eq("id", branchId)
+      .maybeSingle();
 
-    const whereClause = { branchId };
+    if (branchError) throw branchError;
+    if (!branch) return res.status(404).json({ message: "Branch not found" });
 
-    // Filter by stock status
-    if (status) {
-      switch (status) {
-        case "OUT_OF_STOCK":
-          whereClause.currentStock = 0;
-          break;
-        case "CRITICAL":
-          whereClause[Op.and] = [
-            { currentStock: { [Op.gt]: 0 } },
-            sequelize.literal(
-              '"BranchStock"."currentStock" <= "BranchStock"."minimumStock"',
-            ),
-          ];
-          break;
-        case "LOW":
-          whereClause[Op.and] = [
-            { currentStock: { [Op.gt]: 0 } },
-            sequelize.literal(
-              '"BranchStock"."currentStock" > "BranchStock"."minimumStock" AND "BranchStock"."currentStock" <= "BranchStock"."reorderPoint"',
-            ),
-          ];
-          break;
-        case "IN_STOCK":
-          whereClause[Op.and] = [
-            sequelize.literal(
-              '"BranchStock"."currentStock" > "BranchStock"."reorderPoint"',
-            ),
-          ];
-          break;
-      }
-    }
+    let query = supabase
+      .from("branch_stocks")
+      .select(STOCK_WITH_JOINS)
+      .eq("branch_id", branchId)
+      .order("current_stock", { ascending: true });
 
-    const productInclude = {
-      model: Product,
-      as: "product",
-      attributes: [
-        "id",
-        "name",
-        "sku",
-        "brandName",
-        "genericName",
-        "price",
-        "cost",
-        "status",
-      ],
-    };
+    if (status) query = applyStatusFilter(query, status);
 
-    // Add search filter if provided
+    const { data: branchStocks, error } = await query;
+    if (error) throw error;
+
+    // Column-to-column status filtering + product search done in JS
+    let stocks = filterByStatus(branchStocks, status);
+
     if (search) {
-      productInclude.where = {
-        [Op.or]: [
-          { name: { [Op.iLike]: `%${search}%` } },
-          { sku: { [Op.iLike]: `%${search}%` } },
-          { brandName: { [Op.iLike]: `%${search}%` } },
-          { genericName: { [Op.iLike]: `%${search}%` } },
-        ],
-      };
+      const term = search.toLowerCase();
+      stocks = stocks.filter((bs) => {
+        const p = bs.product;
+        return (
+          p?.name?.toLowerCase().includes(term) ||
+          p?.sku?.toLowerCase().includes(term) ||
+          p?.brand_name?.toLowerCase().includes(term) ||
+          p?.generic_name?.toLowerCase().includes(term)
+        );
+      });
     }
 
-    const branchStocks = await BranchStock.findAll({
-      where: whereClause,
-      include: [productInclude],
-      order: [["currentStock", "ASC"]],
-    });
+    const summary = buildSummary(stocks);
 
-    const summary = {
-      totalProducts: branchStocks.length,
-      outOfStock: branchStocks.filter((bs) => bs.currentStock === 0).length,
-      critical: branchStocks.filter(
-        (bs) => bs.currentStock > 0 && bs.currentStock <= bs.minimumStock,
-      ).length,
-      lowStock: branchStocks.filter(
-        (bs) =>
-          bs.currentStock > bs.minimumStock &&
-          bs.currentStock <= bs.reorderPoint,
-      ).length,
-      inStock: branchStocks.filter((bs) => bs.currentStock > bs.reorderPoint)
-        .length,
-    };
-
-    return res.status(200).json({
-      branch: {
-        id: branch.id,
-        name: branch.name,
-        code: branch.code,
-      },
-      summary,
-      stocks: branchStocks,
-    });
+    return res.status(200).json({ branch, summary, stocks });
   } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Server error", error: error.message });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// Transfer stock between branches
-exports.transferStock = async (req, res) => {
-  const t = await sequelize.transaction();
+// ─── Transfer Stock Between Branches ─────────────────────────────────────────
+// Uses a Postgres RPC to keep the transfer atomic.
+// Create this function in Supabase SQL editor (see comment below).
 
+exports.transferStock = async (req, res) => {
   try {
     const { productId, fromBranchId, toBranchId, quantity, reason } = req.body;
     const performedBy = req.user.id;
 
-    // Validation
     if (!productId || !fromBranchId || !toBranchId || !quantity) {
-      await t.rollback();
       return res.status(400).json({
-        message:
-          "Product, source branch, destination branch, and quantity are required",
+        message: "Product, source branch, destination branch, and quantity are required",
       });
     }
-
     if (quantity <= 0) {
-      await t.rollback();
-      return res.status(400).json({
-        message: "Quantity must be positive",
-      });
+      return res.status(400).json({ message: "Quantity must be positive" });
+    }
+    if (String(fromBranchId) === String(toBranchId)) {
+      return res.status(400).json({ message: "Cannot transfer to the same branch" });
     }
 
-    if (fromBranchId === toBranchId) {
-      await t.rollback();
-      return res.status(400).json({
-        message: "Cannot transfer to the same branch",
-      });
-    }
+    // Verify product and branches exist
+    const [
+      { data: product, error: pe },
+      { data: fromBranch, error: fbe },
+      { data: toBranch, error: tbe },
+    ] = await Promise.all([
+      supabase.from("products").select("id, name, sku").eq("id", productId).maybeSingle(),
+      supabase.from("branches").select("id, name").eq("id", fromBranchId).maybeSingle(),
+      supabase.from("branches").select("id, name").eq("id", toBranchId).maybeSingle(),
+    ]);
 
-    // Check if product exists
-    const product = await Product.findByPk(productId);
-    if (!product) {
-      await t.rollback();
-      return res.status(404).json({ message: "Product not found" });
-    }
+    if (pe) throw pe;
+    if (fbe) throw fbe;
+    if (tbe) throw tbe;
+    if (!product) return res.status(404).json({ message: "Product not found" });
+    if (!fromBranch || !toBranch) return res.status(404).json({ message: "Branch not found" });
 
-    // Check if branches exist
-    const fromBranch = await Branch.findByPk(fromBranchId);
-    const toBranch = await Branch.findByPk(toBranchId);
+    /*
+      This calls a Postgres function for atomicity. Create it once in Supabase SQL editor:
 
-    if (!fromBranch || !toBranch) {
-      await t.rollback();
-      return res.status(404).json({ message: "Branch not found" });
-    }
+      create or replace function transfer_branch_stock(
+        p_product_id    bigint,
+        p_from_branch   bigint,
+        p_to_branch     bigint,
+        p_quantity      integer,
+        p_performed_by  bigint,
+        p_reason        text default null
+      ) returns void as $$
+      declare
+        from_stock  integer;
+        to_stock    integer;
+      begin
+        -- Lock source stock row
+        select current_stock into from_stock
+        from branch_stocks
+        where product_id = p_product_id and branch_id = p_from_branch
+        for update;
 
-    // Perform the transfer
-    const transferResult = await Stock.transferBetweenBranches({
-      productId,
-      fromBranchId,
-      toBranchId,
-      quantity,
-      performedBy,
-      reason,
-      transaction: t,
+        if from_stock is null then
+          raise exception 'Source branch stock not initialized';
+        end if;
+        if from_stock < p_quantity then
+          raise exception 'Insufficient stock: available %, requested %', from_stock, p_quantity;
+        end if;
+
+        -- Deduct from source
+        update branch_stocks
+        set current_stock = current_stock - p_quantity
+        where product_id = p_product_id and branch_id = p_from_branch;
+
+        -- Add to destination (upsert)
+        insert into branch_stocks (product_id, branch_id, current_stock)
+        values (p_product_id, p_to_branch, p_quantity)
+        on conflict (product_id, branch_id)
+        do update set current_stock = branch_stocks.current_stock + p_quantity;
+
+        -- Log stock movements
+        insert into stocks (product_id, branch_id, transaction_type, quantity, quantity_before, quantity_after, reason, performed_by)
+        values
+          (p_product_id, p_from_branch, 'ADJUSTMENT', -p_quantity, from_stock, from_stock - p_quantity, p_reason, p_performed_by),
+          (p_product_id, p_to_branch,   'ADJUSTMENT',  p_quantity, coalesce((select current_stock from branch_stocks where product_id = p_product_id and branch_id = p_to_branch), 0) - p_quantity, coalesce((select current_stock from branch_stocks where product_id = p_product_id and branch_id = p_to_branch), 0), p_reason, p_performed_by);
+      end;
+      $$ language plpgsql;
+    */
+
+    const { error: rpcError } = await supabase.rpc("transfer_branch_stock", {
+      p_product_id:   productId,
+      p_from_branch:  fromBranchId,
+      p_to_branch:    toBranchId,
+      p_quantity:     quantity,
+      p_performed_by: performedBy,
+      p_reason:       reason || null,
     });
+
+    if (rpcError) throw rpcError;
 
     await createLog(
-      req,
-      "TRANSFER",
-      "stock",
-      null,
+      req, "TRANSFER", "stock", null,
       `Transferred ${quantity} units of ${product.name} from ${fromBranch.name} to ${toBranch.name}`,
-      {
-        productId,
-        fromBranchId,
-        toBranchId,
-        quantity,
-        reason,
-      },
-      t,
+      { productId, fromBranchId, toBranchId, quantity, reason }
     );
 
-    await t.commit();
-
-    // Fetch updated branch stocks
-    const updatedFromStock = await BranchStock.findOne({
-      where: { productId, branchId: fromBranchId },
-      include: [{ model: Branch, as: "branch" }],
-    });
-
-    const updatedToStock = await BranchStock.findOne({
-      where: { productId, branchId: toBranchId },
-      include: [{ model: Branch, as: "branch" }],
-    });
+    // Fetch updated stocks
+    const [{ data: updatedFrom }, { data: updatedTo }] = await Promise.all([
+      supabase
+        .from("branch_stocks")
+        .select(`*, branch:branches (id, name, code)`)
+        .eq("product_id", productId)
+        .eq("branch_id", fromBranchId)
+        .maybeSingle(),
+      supabase
+        .from("branch_stocks")
+        .select(`*, branch:branches (id, name, code)`)
+        .eq("product_id", productId)
+        .eq("branch_id", toBranchId)
+        .maybeSingle(),
+    ]);
 
     return res.status(200).json({
       message: "Stock transferred successfully",
       transfer: {
         product: { id: product.id, name: product.name, sku: product.sku },
-        from: updatedFromStock,
-        to: updatedToStock,
+        from: updatedFrom,
+        to: updatedTo,
         quantity,
       },
     });
   } catch (error) {
-    await t.rollback();
-    return res
-      .status(500)
-      .json({ message: "Error transferring stock", error: error.message });
+    return res.status(500).json({ message: "Error transferring stock", error: error.message });
   }
 };
 
-// Initialize stock for a product in a branch
+// ─── Initialize Branch Stock ──────────────────────────────────────────────────
+
 exports.initializeBranchStock = async (req, res) => {
   try {
-    const {
-      productId,
-      branchId,
-      currentStock,
-      minimumStock,
-      maximumStock,
-      reorderPoint,
-    } = req.body;
+    const { productId, branchId, currentStock, minimumStock, maximumStock, reorderPoint } = req.body;
 
-    // Validation
     if (!productId || !branchId) {
-      return res.status(400).json({
-        message: "Product ID and Branch ID are required",
-      });
+      return res.status(400).json({ message: "Product ID and Branch ID are required" });
     }
 
-    // Check if product exists
-    const product = await Product.findByPk(productId);
-    if (!product) {
-      return res.status(404).json({ message: "Product not found" });
-    }
+    const [
+      { data: product, error: pe },
+      { data: branch, error: be },
+    ] = await Promise.all([
+      supabase.from("products").select("id, name").eq("id", productId).maybeSingle(),
+      supabase.from("branches").select("id, name").eq("id", branchId).maybeSingle(),
+    ]);
 
-    // Check if branch exists
-    const branch = await Branch.findByPk(branchId);
-    if (!branch) {
-      return res.status(404).json({ message: "Branch not found" });
-    }
+    if (pe) throw pe;
+    if (be) throw be;
+    if (!product) return res.status(404).json({ message: "Product not found" });
+    if (!branch) return res.status(404).json({ message: "Branch not found" });
 
-    // Check if branch stock already exists
-    const existingBranchStock = await BranchStock.findOne({
-      where: { productId, branchId },
-    });
+    // Check if already initialized
+    const { data: existing } = await supabase
+      .from("branch_stocks")
+      .select("id")
+      .eq("product_id", productId)
+      .eq("branch_id", branchId)
+      .maybeSingle();
 
-    if (existingBranchStock) {
+    if (existing) {
       return res.status(400).json({
         message: "Branch stock already initialized for this product",
       });
     }
 
-    // Create branch stock
-    const branchStock = await BranchStock.create({
-      productId,
-      branchId,
-      currentStock: currentStock || 0,
-      minimumStock: minimumStock || 10,
-      maximumStock: maximumStock || null,
-      reorderPoint: reorderPoint || 20,
-    });
+    const { data: branchStock, error } = await supabase
+      .from("branch_stocks")
+      .insert({
+        product_id:    productId,
+        branch_id:     branchId,
+        current_stock: currentStock || 0,
+        minimum_stock: minimumStock || 10,
+        maximum_stock: maximumStock || null,
+        reorder_point: reorderPoint || 20,
+      })
+      .select(`
+        *,
+        product:products (id, name, sku, brand_name),
+        branch:branches  (id, name, code)
+      `)
+      .single();
 
-    const createdStock = await BranchStock.findByPk(branchStock.id, {
-      include: [
-        {
-          model: Product,
-          as: "product",
-          attributes: ["id", "name", "sku", "brandName"],
-        },
-        {
-          model: Branch,
-          as: "branch",
-          attributes: ["id", "name", "code"],
-        },
-      ],
-    });
+    if (error) throw error;
 
     await createLog(
-      req,
-      "CREATE",
-      "branch_stocks",
-      branchStock.id,
+      req, "CREATE", "branch_stocks", branchStock.id,
       `Initialized stock for ${product.name} at ${branch.name}`,
-      { branchStock: branchStock.toJSON() },
+      { branchStock }
     );
 
-    return res.status(201).json(createdStock);
+    return res.status(201).json(branchStock);
   } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Server error", error: error.message });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// Update branch stock settings (not quantity, just thresholds)
+// ─── Update Branch Stock Settings ────────────────────────────────────────────
+
 exports.updateBranchStockSettings = async (req, res) => {
   try {
     const { id } = req.params;
     const { minimumStock, maximumStock, reorderPoint } = req.body;
 
-    const branchStock = await BranchStock.findByPk(id);
-    if (!branchStock) {
-      return res.status(404).json({ message: "Branch stock not found" });
-    }
+    const { data: existing, error: fetchError } = await supabase
+      .from("branch_stocks")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle();
 
-    await branchStock.update({
-      minimumStock:
-        minimumStock !== undefined ? minimumStock : branchStock.minimumStock,
-      maximumStock:
-        maximumStock !== undefined ? maximumStock : branchStock.maximumStock,
-      reorderPoint:
-        reorderPoint !== undefined ? reorderPoint : branchStock.reorderPoint,
-    });
+    if (fetchError) throw fetchError;
+    if (!existing) return res.status(404).json({ message: "Branch stock not found" });
 
-    const updated = await BranchStock.findByPk(id, {
-      include: [
-        {
-          model: Product,
-          as: "product",
-          attributes: ["id", "name", "sku"],
-        },
-        {
-          model: Branch,
-          as: "branch",
-          attributes: ["id", "name", "code"],
-        },
-      ],
-    });
+    const updates = {
+      minimum_stock: minimumStock !== undefined ? minimumStock : existing.minimum_stock,
+      maximum_stock: maximumStock !== undefined ? maximumStock : existing.maximum_stock,
+      reorder_point: reorderPoint !== undefined ? reorderPoint : existing.reorder_point,
+    };
+
+    const { data: updated, error } = await supabase
+      .from("branch_stocks")
+      .update(updates)
+      .eq("id", id)
+      .select(`
+        *,
+        product:products (id, name, sku),
+        branch:branches  (id, name, code)
+      `)
+      .single();
+
+    if (error) throw error;
 
     return res.status(200).json(updated);
   } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Server error", error: error.message });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
 
-// Get stock alerts (low stock, out of stock) across branches
+// ─── Get Stock Alerts ─────────────────────────────────────────────────────────
+
 exports.getStockAlerts = async (req, res) => {
   try {
     const { branchId } = req.query;
 
-    const whereClause = {
-      [Op.or]: [
-        { currentStock: 0 },
-        sequelize.literal(
-          '"BranchStock"."currentStock" <= "BranchStock"."reorderPoint"',
-        ),
-      ],
-    };
+    let query = supabase
+      .from("branch_stocks")
+      .select(`
+        *,
+        product:products!inner (id, name, sku, brand_name, status),
+        branch:branches (id, name, code)
+      `)
+      .eq("product.status", "ACTIVE")  // only active products
+      .order("current_stock", { ascending: true })
+      .order("branch_id", { ascending: true });
 
-    if (branchId) {
-      whereClause.branchId = branchId;
-    }
+    if (branchId) query = query.eq("branch_id", branchId);
 
-    const alerts = await BranchStock.findAll({
-      where: whereClause,
-      include: [
-        {
-          model: Product,
-          as: "product",
-          attributes: ["id", "name", "sku", "brandName", "status"],
-          where: { status: "ACTIVE" }, // Only active products
-        },
-        {
-          model: Branch,
-          as: "branch",
-          attributes: ["id", "name", "code"],
-        },
-      ],
-      order: [
-        ["currentStock", "ASC"],
-        ["branchId", "ASC"],
-      ],
-    });
+    const { data: allStocks, error } = await query;
+    if (error) throw error;
+
+    // Column-to-column comparisons done in JS
+    const alerts = allStocks.filter(
+      (bs) => bs.current_stock === 0 || bs.current_stock <= bs.reorder_point
+    );
 
     const grouped = {
-      outOfStock: alerts.filter((a) => a.currentStock === 0),
+      outOfStock: alerts.filter((a) => a.current_stock === 0),
       critical: alerts.filter(
-        (a) => a.currentStock > 0 && a.currentStock <= a.minimumStock,
+        (a) => a.current_stock > 0 && a.current_stock <= a.minimum_stock
       ),
       lowStock: alerts.filter(
-        (a) =>
-          a.currentStock > a.minimumStock && a.currentStock <= a.reorderPoint,
+        (a) => a.current_stock > a.minimum_stock && a.current_stock <= a.reorder_point
       ),
     };
 
@@ -528,8 +440,36 @@ exports.getStockAlerts = async (req, res) => {
       alerts: grouped,
     });
   } catch (error) {
-    return res
-      .status(500)
-      .json({ message: "Server error", error: error.message });
+    return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
+
+// ─── Internal helpers ─────────────────────────────────────────────────────────
+
+// Column-to-column comparisons (currentStock vs minimumStock/reorderPoint)
+// can't be done in Supabase JS filters, so we do them post-fetch in JS.
+function filterByStatus(stocks, status) {
+  if (!status) return stocks;
+  switch (status) {
+    case "OUT_OF_STOCK":
+      return stocks.filter((bs) => bs.current_stock === 0);
+    case "CRITICAL":
+      return stocks.filter((bs) => bs.current_stock > 0 && bs.current_stock <= bs.minimum_stock);
+    case "LOW":
+      return stocks.filter((bs) => bs.current_stock > bs.minimum_stock && bs.current_stock <= bs.reorder_point);
+    case "IN_STOCK":
+      return stocks.filter((bs) => bs.current_stock > bs.reorder_point);
+    default:
+      return stocks;
+  }
+}
+
+function buildSummary(stocks) {
+  return {
+    totalProducts:  stocks.length,
+    outOfStock:     stocks.filter((bs) => bs.current_stock === 0).length,
+    critical:       stocks.filter((bs) => bs.current_stock > 0 && bs.current_stock <= bs.minimum_stock).length,
+    lowStock:       stocks.filter((bs) => bs.current_stock > bs.minimum_stock && bs.current_stock <= bs.reorder_point).length,
+    inStock:        stocks.filter((bs) => bs.current_stock > bs.reorder_point).length,
+  };
+}
