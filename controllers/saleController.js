@@ -121,7 +121,9 @@ exports.createSale = async (req, res) => {
 
     const activeBranchId = user.current_branch_id || user.branch_id;
     if (!activeBranchId) {
-      return res.status(400).json({ message: "User is not assigned to any branch" });
+      return res
+        .status(400)
+        .json({ message: "User is not assigned to any branch" });
     }
 
     // ── 2. Input validation ──────────────────────────────────────────────────
@@ -144,10 +146,12 @@ exports.createSale = async (req, res) => {
 
     const { data: products, error: productError } = await supabase
       .from("products")
-      .select(`
+      .select(
+        `
         id, name, price,
         branch_stocks!inner (branch_id, current_stock)
-      `)
+      `,
+      )
       .in("id", productIds)
       .eq("branch_stocks.branch_id", activeBranchId);
 
@@ -156,15 +160,17 @@ exports.createSale = async (req, res) => {
     const productMap = new Map(products.map((p) => [p.id, p]));
 
     // ── 4. Validate stock and calculate totals ────────────────────────────────
-    let calculatedSubtotal      = 0;
+    let calculatedSubtotal = 0;
     let calculatedTotalDiscount = 0;
 
     for (const item of cart) {
       const productId = item.productId || item.product.id;
-      const product   = productMap.get(productId);
+      const product = productMap.get(productId);
 
       if (!product) {
-        return res.status(404).json({ message: `Product ID ${productId} not found` });
+        return res
+          .status(404)
+          .json({ message: `Product ID ${productId} not found` });
       }
 
       const branchStock = product.branch_stocks[0];
@@ -184,7 +190,8 @@ exports.createSale = async (req, res) => {
 
       if (item.discountId && item.discountedPrice) {
         calculatedTotalDiscount +=
-          (Number(product.price) - Number(item.discountedPrice)) * item.quantity;
+          (Number(product.price) - Number(item.discountedPrice)) *
+          item.quantity;
       }
     }
 
@@ -198,7 +205,10 @@ exports.createSale = async (req, res) => {
         received: subtotal,
       });
     }
-    if (totalDiscount && Math.abs(calculatedTotalDiscount - totalDiscount) > 0.01) {
+    if (
+      totalDiscount &&
+      Math.abs(calculatedTotalDiscount - totalDiscount) > 0.01
+    ) {
       return res.status(400).json({
         message: "Total discount mismatch",
         calculated: calculatedTotalDiscount,
@@ -209,55 +219,69 @@ exports.createSale = async (req, res) => {
     // ── 5. Build RPC item payload ─────────────────────────────────────────────
     const rpcItems = cart.map((item) => {
       const productId = item.productId || item.product.id;
-      const product   = productMap.get(productId);
-      const price     = Number(product.price);
-      const discountedPrice = item.discountedPrice ? Number(item.discountedPrice) : null;
+      const product = productMap.get(productId);
+      const price = Number(product.price);
+      const discountedPrice = item.discountedPrice
+        ? Number(item.discountedPrice)
+        : null;
 
       return {
-        product_id:       productId,
-        quantity:         item.quantity,
+        product_id: productId,
+        quantity: item.quantity,
         price,
-        discounted_price: discountedPrice !== null ? String(discountedPrice) : "",
-        discount_id:      item.discountId ? String(item.discountId) : "",
-        discount_amount:  discountedPrice
+        discounted_price:
+          discountedPrice !== null ? String(discountedPrice) : "",
+        discount_id: item.discountId ? String(item.discountId) : "",
+        discount_amount: discountedPrice
           ? (price - discountedPrice) * item.quantity
           : 0,
       };
     });
 
     // ── 6. Execute atomic sale via RPC ────────────────────────────────────────
-    const { data: saleId, error: rpcError } = await supabase.rpc("create_sale", {
-      p_sold_by:   req.user.id,
-      p_branch_id: activeBranchId,
-      p_subtotal:  calculatedSubtotal,
-      p_discount:  calculatedTotalDiscount,
-      p_total:     calculatedTotal,
-      p_cash:      cashAmount || null,
-      p_change:    cashAmount ? cashAmount - calculatedTotal : null,
-      p_items:     rpcItems,
-    });
+    const parsedCash = cashAmount ? parseFloat(cashAmount) : null;
+    const { data: saleId, error: rpcError } = await supabase.rpc(
+      "create_sale",
+      {
+        p_sold_by: req.user.id,
+        p_branch_id: activeBranchId,
+        p_subtotal: calculatedSubtotal,
+        p_discount: calculatedTotalDiscount,
+        p_total: calculatedTotal,
+        // p_cash:      cashAmount || null,
+        // p_change:    cashAmount ? cashAmount - calculatedTotal : null,
+        p_cash: parsedCash,
+        p_change: parsedCash ? parsedCash - calculatedTotal : null,
+        p_items: rpcItems,
+      },
+    );
 
     if (rpcError) throw rpcError;
 
     // ── 7. Audit log ──────────────────────────────────────────────────────────
     await createLog(
-      req, "SALE", "sales", saleId,
+      req,
+      "SALE",
+      "sales",
+      saleId,
       `Completed sale #${saleId} - Total: ₱${calculatedTotal.toFixed(2)}`,
       {
-        items:    cart.length,
-        total:    calculatedTotal,
+        items: cart.length,
+        total: calculatedTotal,
         discount: calculatedTotalDiscount,
-        branch:   activeBranchId,
-      }
+        branch: activeBranchId,
+      },
     );
 
     // ── 8. Fetch sale + seller for socket emission ─────────────────────────────
     const { data: completeSale } = await supabase
       .from("sales")
-      .select(`
+      .select(
+        `
         id, total_amount, sold_at, branch_id,
         seller:users (id, username, first_name, last_name)
-      `)
+      `,
+      )
       .eq("id", saleId)
       .maybeSingle();
 
@@ -269,16 +293,16 @@ exports.createSale = async (req, res) => {
       .in("product_id", productIds);
 
     const stockMap = Object.fromEntries(
-      (updatedStocks || []).map((s) => [s.product_id, s.current_stock])
+      (updatedStocks || []).map((s) => [s.product_id, s.current_stock]),
     );
 
     // ── 10. Socket emissions ───────────────────────────────────────────────────
     if (completeSale) {
       emitNewSale({
-        id:          completeSale.id,
+        id: completeSale.id,
         totalAmount: parseFloat(completeSale.total_amount),
-        soldAt:      completeSale.sold_at,
-        branchId:    completeSale.branch_id,
+        soldAt: completeSale.sold_at,
+        branchId: completeSale.branch_id,
         user: {
           fullName: completeSale.seller
             ? `${completeSale.seller.first_name || ""} ${completeSale.seller.last_name || ""}`.trim() ||
@@ -293,24 +317,28 @@ exports.createSale = async (req, res) => {
 
     for (const item of cart) {
       const productId = item.productId || item.product.id;
-      const newStock  = stockMap[productId];
+      const newStock = stockMap[productId];
       emitStockUpdate(activeBranchId, { productId, newStock });
-      console.log(`📦 Stock update emitted: Product ${productId} -> ${newStock} units (Branch ${activeBranchId})`);
+      console.log(
+        `📦 Stock update emitted: Product ${productId} -> ${newStock} units (Branch ${activeBranchId})`,
+      );
     }
 
     // ── 11. Response ───────────────────────────────────────────────────────────
     return res.status(201).json({
-      message:       "Sale recorded successfully",
+      message: "Sale recorded successfully",
       saleId,
-      subtotal:      calculatedSubtotal,
+      subtotal: calculatedSubtotal,
       totalDiscount: calculatedTotalDiscount,
-      totalAmount:   calculatedTotal,
-      cashAmount:    cashAmount || null,
-      changeAmount:  cashAmount ? cashAmount - calculatedTotal : null,
+      totalAmount: calculatedTotal,
+      cashAmount: cashAmount || null,
+      changeAmount: cashAmount ? cashAmount - calculatedTotal : null,
     });
   } catch (error) {
     console.error("Sale error:", error);
-    return res.status(500).json({ message: "Server error", error: error.message });
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
   }
 };
 
@@ -330,12 +358,15 @@ exports.getSales = async (req, res) => {
 
     const activeBranchId = user.current_branch_id || user.branch_id;
     if (!activeBranchId) {
-      return res.status(400).json({ message: "User is not assigned to any branch" });
+      return res
+        .status(400)
+        .json({ message: "User is not assigned to any branch" });
     }
 
     let query = supabase
       .from("sales")
-      .select(`
+      .select(
+        `
         id, subtotal, total_discount, total_amount,
         cash_amount, change_amount, sold_at, sold_by, branch_id, status,
         branch:branches (id, name, code),
@@ -345,7 +376,8 @@ exports.getSales = async (req, res) => {
           product:products (id, name),
           discount:discounts (id, name, discount_type, discount_value)
         )
-      `)
+      `,
+      )
       .order("sold_at", { ascending: false });
 
     // Branch filter — mirror original logic
@@ -360,19 +392,19 @@ exports.getSales = async (req, res) => {
     if (error) throw error;
 
     const response = sales.map((sale) => ({
-      id:            sale.id,
-      branch:        sale.branch ?? null,
-      subtotal:      sale.subtotal      ? parseFloat(sale.subtotal)       : null,
+      id: sale.id,
+      branch: sale.branch ?? null,
+      subtotal: sale.subtotal ? parseFloat(sale.subtotal) : null,
       totalDiscount: sale.total_discount ? parseFloat(sale.total_discount) : 0,
-      totalAmount:   parseFloat(sale.total_amount),
-      cashAmount:    sale.cash_amount   ? parseFloat(sale.cash_amount)    : null,
-      changeAmount:  sale.change_amount ? parseFloat(sale.change_amount)  : null,
-      soldAt:        sale.sold_at,
-      soldBy:        sale.sold_by,
-      status:        sale.status,
+      totalAmount: parseFloat(sale.total_amount),
+      cashAmount: sale.cash_amount ? parseFloat(sale.cash_amount) : null,
+      changeAmount: sale.change_amount ? parseFloat(sale.change_amount) : null,
+      soldAt: sale.sold_at,
+      soldBy: sale.sold_by,
+      status: sale.status,
       seller: sale.seller
         ? {
-            id:    sale.seller.id,
+            id: sale.seller.id,
             name:
               sale.seller.first_name && sale.seller.last_name
                 ? `${sale.seller.first_name} ${sale.seller.last_name}`.trim()
@@ -381,17 +413,21 @@ exports.getSales = async (req, res) => {
           }
         : null,
       items: sale.items.map((item) => ({
-        id:             item.id,
-        product:        { id: item.product.id, name: item.product.name },
-        quantity:       item.quantity,
-        price:          parseFloat(item.price),
-        discountedPrice: item.discounted_price ? parseFloat(item.discounted_price) : null,
-        discountAmount: item.discount_amount   ? parseFloat(item.discount_amount)  : 0,
+        id: item.id,
+        product: { id: item.product.id, name: item.product.name },
+        quantity: item.quantity,
+        price: parseFloat(item.price),
+        discountedPrice: item.discounted_price
+          ? parseFloat(item.discounted_price)
+          : null,
+        discountAmount: item.discount_amount
+          ? parseFloat(item.discount_amount)
+          : 0,
         discount: item.discount
           ? {
-              id:    item.discount.id,
-              name:  item.discount.name,
-              type:  item.discount.discount_type,
+              id: item.discount.id,
+              name: item.discount.name,
+              type: item.discount.discount_type,
               value: parseFloat(item.discount.discount_value),
             }
           : null,
@@ -401,6 +437,8 @@ exports.getSales = async (req, res) => {
     return res.json(response);
   } catch (error) {
     console.error("Error fetching sales:", error);
-    return res.status(500).json({ message: "Error fetching sales", error: error.message });
+    return res
+      .status(500)
+      .json({ message: "Error fetching sales", error: error.message });
   }
 };
