@@ -37,13 +37,13 @@ const getUserActiveBranch = async (userId) => {
 const maybeEmitLowStock = (activeBranchId, branchStock, product, quantityAfter) => {
   if (quantityAfter <= branchStock.reorder_point) {
     emitLowStockAlert(activeBranchId, {
-      id:           product.id,
-      name:         product.name,
-      sku:          product.sku,
-      currentStock: quantityAfter,
-      reorderPoint: branchStock.reorder_point,
-      minimumStock: branchStock.minimum_stock,
-      branchId:     activeBranchId,
+      id:            product.id,
+      name:          product.name,
+      sku:           product.sku,
+      current_stock: quantityAfter,
+      reorder_point: branchStock.reorder_point,
+      minimum_stock: branchStock.minimum_stock,
+      branch_id:     activeBranchId,
     });
   }
 };
@@ -409,9 +409,9 @@ exports.getLowStockProducts = async (req, res) => {
       id:           item.product.id,
       name:         item.product.name,
       sku:          item.product.sku,
-      currentStock: item.current_stock,
-      minimumStock: item.minimum_stock,
-      reorderPoint: item.reorder_point,
+      current_stock: item.current_stock,
+      minimum_stock: item.minimum_stock,
+      reorder_point: item.reorder_point,
       price:        parseFloat(item.product.price),
       branchId:     item.branch_id,
       branchName:   item.branch?.name,
