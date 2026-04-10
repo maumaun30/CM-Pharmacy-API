@@ -5,7 +5,7 @@ const { createLog } = require("../middleware/logMiddleware");
 
 exports.getAllBranches = async (req, res) => {
   try {
-    const { isActive, search } = req.query;
+    const { is_active, search } = req.query;
 
     let query = supabase
       .from("branches")
@@ -13,8 +13,8 @@ exports.getAllBranches = async (req, res) => {
       .order("is_main_branch", { ascending: false })
       .order("name", { ascending: true });
 
-    if (isActive !== undefined) {
-      query = query.eq("is_active", isActive === "true");
+    if (is_active !== undefined) {
+      query = query.eq("is_active", is_active === "true");
     }
 
     if (search) {
@@ -63,8 +63,8 @@ exports.createBranch = async (req, res) => {
   try {
     const {
       name, code, address, city, province,
-      postalCode, phone, email, managerName,
-      isActive, isMainBranch, operatingHours,
+      postal_code, phone, email, manager_name,
+      is_active, is_main_branch, operating_hours,
     } = req.body;
 
     if (!name || !code) {
@@ -85,7 +85,7 @@ exports.createBranch = async (req, res) => {
     // If setting as main branch, unset existing main branch first.
     // The partial unique index on the DB prevents two main branches,
     // so we must clear it before inserting the new one.
-    if (isMainBranch) {
+    if (is_main_branch) {
       const { error: unsetError } = await supabase
         .from("branches")
         .update({ is_main_branch: false })
@@ -101,13 +101,13 @@ exports.createBranch = async (req, res) => {
         address,
         city,
         province,
-        postal_code: postalCode,
+        postal_code: postal_code,
         phone,
         email,
-        manager_name: managerName,
-        is_active: isActive !== undefined ? isActive : true,
-        is_main_branch: isMainBranch || false,
-        operating_hours: operatingHours || null,
+        manager_name: manager_name,
+        is_active: is_active !== undefined ? is_active : true,
+        is_main_branch: is_main_branch || false,
+        operating_hours: operating_hours || null,
       })
       .select()
       .single();
@@ -134,8 +134,8 @@ exports.updateBranch = async (req, res) => {
     const branchId = req.params.id;
     const {
       name, code, address, city, province,
-      postalCode, phone, email, managerName,
-      isActive, isMainBranch, operatingHours,
+      postal_code, phone, email, manager_name,
+      is_active, is_main_branch, operating_hours,
     } = req.body;
 
     const { data: branch, error: fetchError } = await supabase
@@ -160,7 +160,7 @@ exports.updateBranch = async (req, res) => {
     }
 
     // Unset existing main branch if promoting this one
-    if (isMainBranch && !branch.is_main_branch) {
+    if (is_main_branch && !branch.is_main_branch) {
       const { error: unsetError } = await supabase
         .from("branches")
         .update({ is_main_branch: false })
@@ -175,13 +175,13 @@ exports.updateBranch = async (req, res) => {
       address:         address         !== undefined ? address         : branch.address,
       city:            city            !== undefined ? city            : branch.city,
       province:        province        !== undefined ? province        : branch.province,
-      postal_code:     postalCode      !== undefined ? postalCode      : branch.postal_code,
+      postal_code:     postal_code      !== undefined ? postal_code      : branch.postal_code,
       phone:           phone           !== undefined ? phone           : branch.phone,
       email:           email           !== undefined ? email           : branch.email,
-      manager_name:    managerName     !== undefined ? managerName     : branch.manager_name,
-      is_active:       isActive        !== undefined ? isActive        : branch.is_active,
-      is_main_branch:  isMainBranch    !== undefined ? isMainBranch    : branch.is_main_branch,
-      operating_hours: operatingHours  !== undefined ? operatingHours  : branch.operating_hours,
+      manager_name:    manager_name     !== undefined ? manager_name     : branch.manager_name,
+      is_active:       is_active        !== undefined ? is_active        : branch.is_active,
+      is_main_branch:  is_main_branch    !== undefined ? is_main_branch    : branch.is_main_branch,
+      operating_hours: operating_hours  !== undefined ? operating_hours  : branch.operating_hours,
     };
 
     const { data: updatedBranch, error: updateError } = await supabase
@@ -286,7 +286,7 @@ exports.toggleBranchStatus = async (req, res) => {
 
     return res.status(200).json({
       message: `Branch ${newStatus ? "activated" : "deactivated"}`,
-      isActive: newStatus,
+      is_active: newStatus,
     });
   } catch (error) {
     console.error("Error toggling branch status:", error);

@@ -38,16 +38,16 @@ exports.createUser = async (req, res) => {
       username,
       email,
       role,
-      firstName,
-      lastName,
-      contactNumber,
-      isActive,
-      branchId,
+      first_name,
+      last_name,
+      contact_number,
+      is_active,
+      branch_id,
       pin,
     } = req.body;
 
     // Validate required fields first
-    if (!username || !email || !role || isActive === undefined) {
+    if (!username || !email || !role || is_active === undefined) {
       return res.status(400).json({
         message:
           "Missing required fields: username, email, role and status are required",
@@ -90,11 +90,11 @@ exports.createUser = async (req, res) => {
         email,
         password: hashedPassword,
         role,
-        first_name: firstName,
-        last_name: lastName,
-        contact_number: contactNumber,
-        is_active: isActive,
-        branch_id: branchId || null,
+        first_name: first_name,
+        last_name: last_name,
+        contact_number: contact_number,
+        is_active: is_active,
+        branch_id: branch_id || null,
         pin: hashedPin,
       })
       .select(PUBLIC_FIELDS)
@@ -175,12 +175,12 @@ exports.updateUser = async (req, res) => {
       username,
       email,
       role,
-      firstName,
-      lastName,
-      contactNumber,
-      isActive,
-      branchId,
-      pin,
+      first_name,
+      last_name,
+      contact_number,
+      is_active,
+      branch_id,
+      // pin,
     } = req.body;
     const userId = req.params.id;
 
@@ -219,14 +219,14 @@ exports.updateUser = async (req, res) => {
     if (username !== undefined) updates.username = username;
     if (email !== undefined) updates.email = email;
     if (role !== undefined) updates.role = role;
-    if (firstName !== undefined) updates.first_name = firstName;
-    if (lastName !== undefined) updates.last_name = lastName;
-    if (contactNumber !== undefined) updates.contact_number = contactNumber;
-    if (isActive !== undefined) updates.is_active = isActive;
-    if (branchId !== undefined) updates.branch_id = branchId || null;
-    if (pin !== undefined) {
-      updates.pin = pin ? await bcrypt.hash(String(pin), 10) : null;
-    }
+    if (first_name !== undefined) updates.first_name = first_name;
+    if (last_name !== undefined) updates.last_name = last_name;
+    if (contact_number !== undefined) updates.contact_number = contact_number;
+    if (is_active !== undefined) updates.is_active = is_active;
+    if (branch_id !== undefined) updates.branch_id = branch_id || null;
+    // if (pin !== undefined) {
+    //   updates.pin = pin ? await bcrypt.hash(String(pin), 10) : null;
+    // }
 
     const { data: updatedUser, error: updateError } = await supabase
       .from("users")

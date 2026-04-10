@@ -44,7 +44,7 @@ const applyStatusFilter = (query, status) => {
 
 exports.getAllBranchStocks = async (req, res) => {
   try {
-    const { branchId, productId, status } = req.query;
+    const { branch_id, product_id, status } = req.query;
 
     let query = supabase
       .from("branch_stocks")
@@ -52,8 +52,8 @@ exports.getAllBranchStocks = async (req, res) => {
       .order("branch_id", { ascending: true })
       .order("current_stock", { ascending: true });
 
-    if (branchId) query = query.eq("branch_id", branchId);
-    if (productId) query = query.eq("product_id", productId);
+    if (branch_id) query = query.eq("branch_id", branch_id);
+    if (product_id) query = query.eq("product_id", product_id);
     if (status) query = applyStatusFilter(query, status);
 
     const { data: branchStocks, error } = await query;
@@ -72,12 +72,12 @@ exports.getAllBranchStocks = async (req, res) => {
 
 exports.getProductStockAllBranches = async (req, res) => {
   try {
-    const { productId } = req.params;
+    const { product_id } = req.params;
 
     const { data: product, error: productError } = await supabase
       .from("products")
       .select("id, name, sku, brand_name")
-      .eq("id", productId)
+      .eq("id", product_id)
       .maybeSingle();
 
     if (productError) throw productError;
@@ -86,7 +86,7 @@ exports.getProductStockAllBranches = async (req, res) => {
     const { data: branchStocks, error } = await supabase
       .from("branch_stocks")
       .select(`*, branch:branches (id, name, code, address)`)
-      .eq("product_id", productId)
+      .eq("product_id", product_id)
       .order("branch_id", { ascending: true });
 
     if (error) throw error;
@@ -106,13 +106,13 @@ exports.getProductStockAllBranches = async (req, res) => {
 
 exports.getBranchStock = async (req, res) => {
   try {
-    const { branchId } = req.params;
+    const { branch_id } = req.params;
     const { status, search } = req.query;
 
     const { data: branch, error: branchError } = await supabase
       .from("branches")
       .select("id, name, code")
-      .eq("id", branchId)
+      .eq("id", branch_id)
       .maybeSingle();
 
     if (branchError) throw branchError;
@@ -121,7 +121,7 @@ exports.getBranchStock = async (req, res) => {
     let query = supabase
       .from("branch_stocks")
       .select(STOCK_WITH_JOINS)
-      .eq("branch_id", branchId)
+      .eq("branch_id", branch_id)
       .order("current_stock", { ascending: true });
 
     if (status) query = applyStatusFilter(query, status);
@@ -159,10 +159,10 @@ exports.getBranchStock = async (req, res) => {
 
 exports.transferStock = async (req, res) => {
   try {
-    const { productId, fromBranchId, toBranchId, quantity, reason } = req.body;
+    const { product_id, frombranch_id, tobranch_id, quantity, reason } = req.body;
     const performedBy = req.user.id;
 
-    if (!productId || !fromBranchId || !toBranchId || !quantity) {
+    if (!product_id || !frombranch_id || !tobranch_id || !quantity) {
       return res.status(400).json({
         message: "Product, source branch, destination branch, and quantity are required",
       });
@@ -170,7 +170,7 @@ exports.transferStock = async (req, res) => {
     if (quantity <= 0) {
       return res.status(400).json({ message: "Quantity must be positive" });
     }
-    if (String(fromBranchId) === String(toBranchId)) {
+    if (String(frombranch_id) === String(tobranch_id)) {
       return res.status(400).json({ message: "Cannot transfer to the same branch" });
     }
 
@@ -180,9 +180,9 @@ exports.transferStock = async (req, res) => {
       { data: fromBranch, error: fbe },
       { data: toBranch, error: tbe },
     ] = await Promise.all([
-      supabase.from("products").select("id, name, sku").eq("id", productId).maybeSingle(),
-      supabase.from("branches").select("id, name").eq("id", fromBranchId).maybeSingle(),
-      supabase.from("branches").select("id, name").eq("id", toBranchId).maybeSingle(),
+      supabase.from("products").select("id, name, sku").eq("id", product_id).maybeSingle(),
+      supabase.from("branches").select("id, name").eq("id", frombranch_id).maybeSingle(),
+      supabase.from("branches").select("id, name").eq("id", tobranch_id).maybeSingle(),
     ]);
 
     if (pe) throw pe;
@@ -240,9 +240,9 @@ exports.transferStock = async (req, res) => {
     */
 
     const { error: rpcError } = await supabase.rpc("transfer_branch_stock", {
-      p_product_id:   productId,
-      p_from_branch:  fromBranchId,
-      p_to_branch:    toBranchId,
+      p_product_id:   product_id,
+      p_from_branch:  frombranch_id,
+      p_to_branch:    tobranch_id,
       p_quantity:     quantity,
       p_performed_by: performedBy,
       p_reason:       reason || null,
@@ -253,7 +253,7 @@ exports.transferStock = async (req, res) => {
     await createLog(
       req, "TRANSFER", "stock", null,
       `Transferred ${quantity} units of ${product.name} from ${fromBranch.name} to ${toBranch.name}`,
-      { productId, fromBranchId, toBranchId, quantity, reason }
+      { product_id, frombranch_id, tobranch_id, quantity, reason }
     );
 
     // Fetch updated stocks
@@ -261,14 +261,14 @@ exports.transferStock = async (req, res) => {
       supabase
         .from("branch_stocks")
         .select(`*, branch:branches (id, name, code)`)
-        .eq("product_id", productId)
-        .eq("branch_id", fromBranchId)
+        .eq("product_id", product_id)
+        .eq("branch_id", frombranch_id)
         .maybeSingle(),
       supabase
         .from("branch_stocks")
         .select(`*, branch:branches (id, name, code)`)
-        .eq("product_id", productId)
-        .eq("branch_id", toBranchId)
+        .eq("product_id", product_id)
+        .eq("branch_id", tobranch_id)
         .maybeSingle(),
     ]);
 
@@ -290,9 +290,9 @@ exports.transferStock = async (req, res) => {
 
 exports.initializeBranchStock = async (req, res) => {
   try {
-    const { productId, branchId, currentStock, minimumStock, maximumStock, reorderPoint } = req.body;
+    const { product_id, branch_id, currentStock, minimumStock, maximumStock, reorderPoint } = req.body;
 
-    if (!productId || !branchId) {
+    if (!product_id || !branch_id) {
       return res.status(400).json({ message: "Product ID and Branch ID are required" });
     }
 
@@ -300,8 +300,8 @@ exports.initializeBranchStock = async (req, res) => {
       { data: product, error: pe },
       { data: branch, error: be },
     ] = await Promise.all([
-      supabase.from("products").select("id, name").eq("id", productId).maybeSingle(),
-      supabase.from("branches").select("id, name").eq("id", branchId).maybeSingle(),
+      supabase.from("products").select("id, name").eq("id", product_id).maybeSingle(),
+      supabase.from("branches").select("id, name").eq("id", branch_id).maybeSingle(),
     ]);
 
     if (pe) throw pe;
@@ -313,8 +313,8 @@ exports.initializeBranchStock = async (req, res) => {
     const { data: existing } = await supabase
       .from("branch_stocks")
       .select("id")
-      .eq("product_id", productId)
-      .eq("branch_id", branchId)
+      .eq("product_id", product_id)
+      .eq("branch_id", branch_id)
       .maybeSingle();
 
     if (existing) {
@@ -326,8 +326,8 @@ exports.initializeBranchStock = async (req, res) => {
     const { data: branchStock, error } = await supabase
       .from("branch_stocks")
       .insert({
-        product_id:    productId,
-        branch_id:     branchId,
+        product_id:    product_id,
+        branch_id:     branch_id,
         current_stock: currentStock || 0,
         minimum_stock: minimumStock || 10,
         maximum_stock: maximumStock || null,
@@ -399,7 +399,7 @@ exports.updateBranchStockSettings = async (req, res) => {
 
 exports.getStockAlerts = async (req, res) => {
   try {
-    const { branchId } = req.query;
+    const { branch_id } = req.query;
 
     let query = supabase
       .from("branch_stocks")
@@ -412,7 +412,7 @@ exports.getStockAlerts = async (req, res) => {
       .order("current_stock", { ascending: true })
       .order("branch_id", { ascending: true });
 
-    if (branchId) query = query.eq("branch_id", branchId);
+    if (branch_id) query = query.eq("branch_id", branch_id);
 
     const { data: allStocks, error } = await query;
     if (error) throw error;
