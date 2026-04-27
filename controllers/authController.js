@@ -89,7 +89,7 @@ exports.login = async (req, res) => {
 
     const { data: user, error } = await supabase
       .from("users")
-      .select("*")
+      .select("id, username, email, role, password, is_active")
       .eq("username", username)
       .maybeSingle();
 
@@ -352,7 +352,7 @@ exports.loginWithPin = async (req, res) => {
 
     const { data: user, error } = await supabase
       .from("users")
-      .select("*")
+      .select("id, username, email, role, pin, is_active")
       .eq("username", username)
       .maybeSingle();
 
