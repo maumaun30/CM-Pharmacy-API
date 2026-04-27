@@ -24,7 +24,7 @@ exports.getCategoryById = async (req, res) => {
   try {
     const { data: category, error } = await supabase
       .from("categories")
-      .select(`*, products (*)`)
+      .select(`id, name, description, products (id, name, sku, price, status)`)
       .eq("id", req.params.id)
       .maybeSingle();
 

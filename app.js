@@ -1,6 +1,9 @@
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
+const compression = require("compression");
+const helmet = require("helmet");
+const rateLimit = require("express-rate-limit");
 const dotenv = require("dotenv");
 const categoryRoutes = require("./routes/categoryRoutes");
 const productRoutes = require("./routes/productRoutes");
@@ -22,16 +25,26 @@ const server = http.createServer(app);
 
 initializeSocket(server);
 
+app.use(helmet());
 app.use(
   cors({
     origin: process.env.CLIENT_URL || "http://localhost:3000",
     credentials: true,
   })
 );
+app.use(compression());
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 
-app.use("/api/auth", authRoutes);
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 20,
+  message: { message: "Too many login attempts. Try again in 15 minutes." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use("/api/auth", authLimiter, authRoutes);
 app.use("/api/categories", categoryRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/discounts", discountRoutes);
