@@ -86,8 +86,8 @@ const { emitDashboardRefresh, emitStockUpdate } = require("../utils/socket");
 //     );
 //   end loop;
 //
-//   -- 3. Update sale status
-//   update sales set status = p_new_sale_status where id = p_sale_id;
+//   -- 3. Update sale status (cast text → sale_status enum)
+//   update sales set status = p_new_sale_status::sale_status where id = p_sale_id;
 //
 //   return v_refund_id;
 // end;
