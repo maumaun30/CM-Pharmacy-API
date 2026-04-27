@@ -309,7 +309,7 @@ exports.getRefundsBySale = async (req, res) => {
         id, sale_id, total_refund, reason, created_at,
         refunder:users (id, username, first_name, last_name),
         items:refund_items (
-          id, quantity, refund_amount,
+          id, sale_item_id, quantity, refund_amount,
           product:products (id, name)
         )
       `,
@@ -336,6 +336,7 @@ exports.getRefundsBySale = async (req, res) => {
         : null,
       items: refund.items.map((item) => ({
         id: item.id,
+        saleItemId: item.sale_item_id,
         product: { id: item.product.id, name: item.product.name },
         quantity: item.quantity,
         refundAmount: parseFloat(item.refund_amount),
