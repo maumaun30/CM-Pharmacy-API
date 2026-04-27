@@ -51,19 +51,18 @@ values
   );
 
 -- ─── 2. Users ─────────────────────────────────────────────────────────────────
--- Passwords are bcrypt hashed (cost 10): admin123 / staff123
--- Re-hash via your app if needed; these are safe for dev seeding.
+-- Passwords are bcrypt hashed (cost 10): admin → admin123 / staff → staff123
 
 insert into users (username, email, password, role, first_name, last_name, contact_number, is_active)
 values
   (
     'admin', 'admin@pharmacy.com',
-    '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', -- admin123
+    '$2b$10$HugcJxMb0BURB1k2HkyHeuWqO6RfgvaUoy5v0rIvE/ro1YjcCU8Yy', -- admin123
     'admin', 'Admin', 'Admin', '1234567890', true
   ),
   (
     'staff', 'staff@pharmacy.com',
-    '$2a$10$92IXUNpkjO0rOQ5byMi.Ye4oKoEa3Ro9llC/.og/at2.uheWG/igi', -- staff123
+    '$2b$10$O2QmuhdRRdVkzNF6bILbwOh6IpcUiJiXdCnwPt7oxDIC.BBSSRLiO', -- staff123
     'cashier', 'Staff', 'Staff', '1234567890', true
   );
 
