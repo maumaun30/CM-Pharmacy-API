@@ -9,6 +9,7 @@ router.use(authenticateUser);
 router.get("/stats", dashboardController.getDashboardStats);
 router.get("/weekly-trend", dashboardController.getWeeklySalesTrend);
 router.get("/top-products", dashboardController.getTopProducts);
+router.get("/analytics-top-products", dashboardController.getAnalyticsTopProducts);
 router.get("/sales-trend", dashboardController.getSalesTrend);
 
 module.exports = router;

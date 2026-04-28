@@ -228,6 +228,102 @@ exports.getTopProducts = async (req, res) => {
   }
 };
 
+// ─── Get Analytics Top Products (period-aware) ────────────────────────────────
+//
+// Requires an updated Supabase RPC that accepts p_until:
+//
+//   create or replace function get_top_products(
+//     p_branch_id  bigint      default null,
+//     p_since      timestamptz default now() - interval '30 days',
+//     p_until      timestamptz default now(),
+//     p_limit      integer     default 10
+//   )
+//   returns table (
+//     id bigint, name text, sku text, price numeric,
+//     total_quantity_sold bigint, total_revenue numeric, number_of_sales bigint
+//   ) as $$
+//   begin
+//     return query
+//     select p.id, p.name, p.sku, p.price,
+//            sum(si.quantity)::bigint             as total_quantity_sold,
+//            sum(si.quantity * si.price)          as total_revenue,
+//            count(distinct si.sale_id)::bigint   as number_of_sales
+//     from products p
+//     inner join sale_items si on p.id = si.product_id
+//     inner join sales s       on si.sale_id = s.id
+//     where s.sold_at >= p_since and s.sold_at <= p_until
+//       and (p_branch_id is null or s.branch_id = p_branch_id)
+//     group by p.id, p.name, p.sku, p.price
+//     order by total_quantity_sold desc
+//     limit p_limit;
+//   end;
+//   $$ language plpgsql;
+
+exports.getAnalyticsTopProducts = async (req, res) => {
+  try {
+    const limit          = parseInt(req.query.limit) || 10;
+    const period         = req.query.period || "monthly";
+    const offset         = parseInt(req.query.offset ?? "0", 10);
+    const activeBranchId = getActiveBranchId(req.user);
+
+    let rangeStart, rangeEnd;
+    if (period === "daily") {
+      rangeStart = dayjs().add(offset, "day").startOf("day");
+      rangeEnd   = dayjs().add(offset, "day").endOf("day");
+    } else if (period === "weekly") {
+      rangeStart = dayjs().add(offset, "week").startOf("week");
+      rangeEnd   = dayjs().add(offset, "week").endOf("week");
+    } else if (period === "annual") {
+      rangeStart = dayjs().add(offset, "year").startOf("year");
+      rangeEnd   = dayjs().add(offset, "year").endOf("year");
+    } else {
+      rangeStart = dayjs().add(offset, "month").startOf("month");
+      rangeEnd   = dayjs().add(offset, "month").endOf("month");
+    }
+
+    const cacheKey = `dashboard:analytics-top:${activeBranchId ?? "all"}:${period}:${offset}:${limit}`;
+
+    const result = await getCached(cacheKey, TTL_MEDIUM, async () => {
+      // Try the updated RPC signature with p_until first
+      let { data: topProducts, error } = await supabase.rpc("get_top_products", {
+        p_branch_id: activeBranchId,
+        p_since:     rangeStart.toISOString(),
+        p_until:     rangeEnd.toISOString(),
+        p_limit:     limit,
+      });
+
+      // Fallback: old signature without p_until (PGRST202 = function not found)
+      if (error && error.code === "PGRST202") {
+        console.warn(
+          "[analytics-top-products] RPC missing p_until param — falling back to since-only. " +
+          "Run migration 20260428000000_update_get_top_products.sql to enable period scoping."
+        );
+        ({ data: topProducts, error } = await supabase.rpc("get_top_products", {
+          p_branch_id: activeBranchId,
+          p_since:     rangeStart.toISOString(),
+          p_limit:     limit,
+        }));
+      }
+      if (error) throw error;
+
+      return (topProducts || []).map((p) => ({
+        id:                p.id,
+        name:              p.name,
+        sku:               p.sku,
+        price:             parseFloat(p.price),
+        totalQuantitySold: parseInt(p.total_quantity_sold),
+        totalRevenue:      parseFloat(p.total_revenue),
+        numberOfSales:     parseInt(p.number_of_sales),
+      }));
+    });
+
+    return res.json(result);
+  } catch (error) {
+    console.error("Analytics top products error:", error);
+    return res.status(500).json({ message: "Error fetching analytics top products", error: error.message });
+  }
+};
+
 // ─── Get Stock Alerts ─────────────────────────────────────────────────────────
 
 exports.getStockAlerts = async (req, res) => {
@@ -301,9 +397,13 @@ exports.getSalesTrend = async (req, res) => {
       } else if (mode === "weekly") {
         rangeStart = dayjs().add(offset, "week").startOf("week");
         rangeEnd   = dayjs().add(offset, "week").endOf("week");
-      } else {
+      } else if (mode === "monthly") {
         rangeStart = dayjs().add(offset, "month").startOf("month");
         rangeEnd   = dayjs().add(offset, "month").endOf("month");
+      } else {
+        // annual
+        rangeStart = dayjs().add(offset, "year").startOf("year");
+        rangeEnd   = dayjs().add(offset, "year").endOf("year");
       }
 
       let query = supabase
@@ -346,7 +446,9 @@ exports.getSalesTrend = async (req, res) => {
 
 function getDateKey(soldAt, mode) {
   const d = dayjs(soldAt);
-  return mode === "daily" ? d.format("HH") : d.format("YYYY-MM-DD");
+  if (mode === "daily")  return d.format("HH");
+  if (mode === "annual") return d.format("YYYY-MM");
+  return d.format("YYYY-MM-DD");
 }
 
 function buildSkeleton(mode, rangeStart) {
@@ -372,13 +474,24 @@ function buildSkeleton(mode, rangeStart) {
         transactions: 0,
       });
     }
-  } else {
+  } else if (mode === "monthly") {
     const daysInMonth = dayjs(rangeStart).daysInMonth();
     for (let d = 0; d < daysInMonth; d++) {
       const day = dayjs(rangeStart).add(d, "day");
       points.push({
         label:        day.format("D"),
         dateKey:      day.format("YYYY-MM-DD"),
+        sales:        0,
+        transactions: 0,
+      });
+    }
+  } else {
+    // annual — 12 monthly buckets
+    for (let m = 0; m < 12; m++) {
+      const month = dayjs(rangeStart).add(m, "month");
+      points.push({
+        label:        month.format("MMM"),
+        dateKey:      month.format("YYYY-MM"),
         sales:        0,
         transactions: 0,
       });
