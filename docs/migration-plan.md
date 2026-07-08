@@ -56,11 +56,17 @@ scalable, resume-worthy AWS deployment.
    - ✅ `logController` (+ `get_log_stats` RPC materialized — tested)
    - ✅ `userController` (tested)
    - ✅ `branchController` (tested)
-   - ⬜ `productController`, `discountController`, `branchStockController`,
+   - ✅ `productController`, `discountController`, `branchStockController`,
      `stockController`, `refundController`, `saleController` (RPC),
-     `dashboardController` (heaviest — analytics)
-6. ⬜ **Cutover** — `server.js` health check uses the pool; remove
-   `@supabase/supabase-js` and `config/supabase.js`; verify boot + POS flow.
+     `dashboardController` — all migrated + integration-tested
+6. ✅ **Cutover** — `server.js` health check uses the pool; removed
+   `@supabase/supabase-js` and `config/supabase.js`. Verified end-to-end over
+   HTTP (login → JWT → /auth/me → /products → /dashboard/stats, all 200).
+
+**Phase 1 is complete.** The API runs entirely on self-hosted Postgres via
+Drizzle with zero Supabase references. RPCs materialized into `db/functions/`:
+`create_sale`, `process_refund`, `transfer_branch_stock`, `get_log_stats`.
+Next: Phase 2 (AWS) — see `architecture.md`.
 
 ### Phase 2 — AWS (separate branch/effort)
 See `architecture.md`. RDS Postgres (Multi-AZ), Express on ECS Fargate behind an
