@@ -6,6 +6,8 @@ const { schema } = require("../config/db");
 
 const b = schema.branches;
 const u = schema.users;
+const p = schema.products;
+const bs = schema.branchStocks;
 
 // Full branches row (matches `branches.select("*")`).
 const branchFull = {
@@ -42,4 +44,38 @@ const userProfile = {
   updated_at: u.updatedAt,
 };
 
-module.exports = { branchFull, userProfile };
+// Full products row (matches `products.select("*")`).
+const productFull = {
+  id: p.id,
+  name: p.name,
+  sku: p.sku,
+  barcode: p.barcode,
+  description: p.description,
+  price: p.price,
+  cost: p.cost,
+  expiry_date: p.expiryDate,
+  brand_name: p.brandName,
+  generic_name: p.genericName,
+  dosage: p.dosage,
+  form: p.form,
+  requires_prescription: p.requiresPrescription,
+  status: p.status,
+  category_id: p.categoryId,
+  created_at: p.createdAt,
+  updated_at: p.updatedAt,
+};
+
+// Full branch_stocks row (matches `branch_stocks.select("*")`).
+const branchStockFull = {
+  id: bs.id,
+  product_id: bs.productId,
+  branch_id: bs.branchId,
+  current_stock: bs.currentStock,
+  minimum_stock: bs.minimumStock,
+  maximum_stock: bs.maximumStock,
+  reorder_point: bs.reorderPoint,
+  created_at: bs.createdAt,
+  updated_at: bs.updatedAt,
+};
+
+module.exports = { branchFull, userProfile, productFull, branchStockFull };

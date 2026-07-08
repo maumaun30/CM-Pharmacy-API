@@ -1,22 +1,47 @@
-const supabase = require("../config/supabase");
+const { and, or, eq, ilike, gte, lte, desc, asc, inArray } = require("drizzle-orm");
+const { db, schema } = require("../config/db");
+const { productFull, branchStockFull } = require("../db/projections");
 const { createLog } = require("../middleware/logMiddleware");
 
-// ─── Shared select strings ────────────────────────────────────────────────────
+const { products, categories, branchStocks, branches } = schema;
 
-const PRODUCT_WITH_STOCKS = `
-  *,
-  category:categories (id, name),
-  branch_stocks (
-    *,
-    branch:branches (id, name, code)
-  )
-`;
+const categoryMini = { id: categories.id, name: categories.name };
+const branchMini = { id: branches.id, name: branches.name, code: branches.code };
 
-const BRANCH_STOCK_WITH_RELATIONS = `
-  *,
-  product:products (id, name, sku, brand_name),
-  branch:branches  (id, name, code)
-`;
+// Attach `branch_stocks[]` (each with nested `branch`) to product rows,
+// reproducing the supabase PRODUCT_WITH_STOCKS nested shape.
+async function attachStocks(productRows) {
+  if (productRows.length === 0) return productRows;
+  const ids = productRows.map((p) => p.id);
+
+  const stockRows = await db
+    .select({ ...branchStockFull, branch: branchMini })
+    .from(branchStocks)
+    .leftJoin(branches, eq(branchStocks.branchId, branches.id))
+    .where(inArray(branchStocks.productId, ids));
+
+  const byProduct = new Map();
+  for (const s of stockRows) {
+    s.branch = s.branch?.id ? s.branch : null;
+    if (!byProduct.has(s.product_id)) byProduct.set(s.product_id, []);
+    byProduct.get(s.product_id).push(s);
+  }
+
+  return productRows.map((p) => ({ ...p, branch_stocks: byProduct.get(p.id) || [] }));
+}
+
+// Single product with category + branch_stocks(with branch). Returns null if missing.
+async function fetchProductWithStocks(id) {
+  const [product] = await db
+    .select({ ...productFull, category: categoryMini })
+    .from(products)
+    .leftJoin(categories, eq(products.categoryId, categories.id))
+    .where(eq(products.id, id))
+    .limit(1);
+  if (!product) return null;
+  const [withStocks] = await attachStocks([product]);
+  return withStocks;
+}
 
 // ─── Get All Products ─────────────────────────────────────────────────────────
 
@@ -33,27 +58,34 @@ exports.getAllProducts = async (req, res) => {
       branchId,
     } = req.query;
 
-    let query = supabase
-      .from("products")
-      .select(PRODUCT_WITH_STOCKS)
-      .order("created_at", { ascending: false });
-
-    if (categoryId)              query = query.eq("category_id", categoryId);
-    if (status)                  query = query.eq("status", status);
+    const conds = [];
+    if (categoryId) conds.push(eq(products.categoryId, categoryId));
+    if (status) conds.push(eq(products.status, status));
     if (requiresPrescription !== undefined)
-      query = query.eq("requires_prescription", requiresPrescription === "true");
-    if (minPrice !== undefined)  query = query.gte("price", parseFloat(minPrice));
-    if (maxPrice !== undefined)  query = query.lte("price", parseFloat(maxPrice));
+      conds.push(eq(products.requiresPrescription, requiresPrescription === "true"));
+    if (minPrice !== undefined) conds.push(gte(products.price, parseFloat(minPrice)));
+    if (maxPrice !== undefined) conds.push(lte(products.price, parseFloat(maxPrice)));
     if (search)
-      query = query.or(
-        `name.ilike.%${search}%,description.ilike.%${search}%,generic_name.ilike.%${search}%,brand_name.ilike.%${search}%`
+      conds.push(
+        or(
+          ilike(products.name, `%${search}%`),
+          ilike(products.description, `%${search}%`),
+          ilike(products.genericName, `%${search}%`),
+          ilike(products.brandName, `%${search}%`)
+        )
       );
 
-    const { data: products, error } = await query;
-    if (error) throw error;
+    const productRows = await db
+      .select({ ...productFull, category: categoryMini })
+      .from(products)
+      .leftJoin(categories, eq(products.categoryId, categories.id))
+      .where(conds.length ? and(...conds) : undefined)
+      .orderBy(desc(products.createdAt));
 
-    // Post-process: filter by branchId and inStock in JS
-    let result = products.map((p) => {
+    const withStocks = await attachStocks(productRows);
+
+    // Post-process: branchId filter, totalStock, inStock (matches prior JS).
+    let result = withStocks.map((p) => {
       const stocks = branchId
         ? p.branch_stocks.filter((bs) => String(bs.branch_id) === String(branchId))
         : p.branch_stocks;
@@ -86,13 +118,7 @@ exports.getProductById = async (req, res) => {
   try {
     const { branchId } = req.query;
 
-    const { data: product, error } = await supabase
-      .from("products")
-      .select(PRODUCT_WITH_STOCKS)
-      .eq("id", req.params.id)
-      .maybeSingle();
-
-    if (error) throw error;
+    const product = await fetchProductWithStocks(req.params.id);
     if (!product) return res.status(404).json({ message: "Product not found" });
 
     const stocks = branchId
@@ -124,81 +150,62 @@ exports.createProduct = async (req, res) => {
       });
     }
 
-    // SKU uniqueness
-    const { data: existingSku } = await supabase
-      .from("products").select("id").eq("sku", sku).maybeSingle();
+    const [existingSku] = await db
+      .select({ id: products.id }).from(products).where(eq(products.sku, sku)).limit(1);
     if (existingSku) return res.status(400).json({ message: "Product with this SKU already exists" });
 
-    // Barcode uniqueness
     if (barcode) {
-      const { data: existingBarcode } = await supabase
-        .from("products").select("id").eq("barcode", barcode).maybeSingle();
+      const [existingBarcode] = await db
+        .select({ id: products.id }).from(products).where(eq(products.barcode, barcode)).limit(1);
       if (existingBarcode) return res.status(400).json({ message: "Product with this barcode already exists" });
     }
 
-    // Category existence
-    const { data: category } = await supabase
-      .from("categories").select("id").eq("id", categoryId).maybeSingle();
+    const [category] = await db
+      .select({ id: categories.id }).from(categories).where(eq(categories.id, categoryId)).limit(1);
     if (!category) return res.status(400).json({ message: "Category not found" });
 
-    // Insert product
-    const { data: newProduct, error: insertError } = await supabase
-      .from("products")
-      .insert({
+    const [newProduct] = await db
+      .insert(products)
+      .values({
         name, sku, barcode, description, price, cost,
-        expiry_date:           expiryDate || null,
-        brand_name:            brandName,
-        generic_name:          genericName,
+        expiryDate: expiryDate || null,
+        brandName,
+        genericName,
         dosage, form,
-        requires_prescription: requiresPrescription || false,
-        status:                status || "ACTIVE",
-        category_id:           categoryId,
+        requiresPrescription: requiresPrescription || false,
+        status: status || "ACTIVE",
+        categoryId,
       })
-      .select("id, name")
-      .single();
+      .returning({ id: products.id, name: products.name });
 
-    if (insertError) throw insertError;
-
-    // Initialize branch stocks
+    // Initialize branch stocks (explicit input, or auto-init for all branches).
     let stockRows;
     if (branchStockInput?.length > 0) {
       stockRows = branchStockInput.map((bs) => ({
-        product_id:    newProduct.id,
-        branch_id:     bs.branchId,
-        current_stock: bs.currentStock  || 0,
-        minimum_stock: bs.minimumStock  || 10,
-        maximum_stock: bs.maximumStock  || null,
-        reorder_point: bs.reorderPoint  || 20,
+        productId: newProduct.id,
+        branchId: bs.branchId,
+        currentStock: bs.currentStock || 0,
+        minimumStock: bs.minimumStock || 10,
+        maximumStock: bs.maximumStock || null,
+        reorderPoint: bs.reorderPoint || 20,
       }));
     } else {
-      // Auto-init stock for all branches
-      const { data: allBranches, error: branchError } = await supabase
-        .from("branches").select("id");
-      if (branchError) throw branchError;
-
+      const allBranches = await db.select({ id: branches.id }).from(branches);
       stockRows = allBranches.map((b) => ({
-        product_id:    newProduct.id,
-        branch_id:     b.id,
-        current_stock: 0,
-        minimum_stock: 10,
-        maximum_stock: null,
-        reorder_point: 20,
+        productId: newProduct.id,
+        branchId: b.id,
+        currentStock: 0,
+        minimumStock: 10,
+        maximumStock: null,
+        reorderPoint: 20,
       }));
     }
 
     if (stockRows.length > 0) {
-      const { error: stockError } = await supabase.from("branch_stocks").insert(stockRows);
-      if (stockError) throw stockError;
+      await db.insert(branchStocks).values(stockRows);
     }
 
-    // Fetch full product with details
-    const { data: productWithDetails, error: fetchError } = await supabase
-      .from("products")
-      .select(PRODUCT_WITH_STOCKS)
-      .eq("id", newProduct.id)
-      .single();
-
-    if (fetchError) throw fetchError;
+    const productWithDetails = await fetchProductWithStocks(newProduct.id);
 
     await createLog(
       req, "CREATE", "products", newProduct.id,
@@ -223,57 +230,50 @@ exports.updateProduct = async (req, res) => {
     } = req.body;
     const productId = req.params.id;
 
-    const { data: product, error: fetchError } = await supabase
-      .from("products").select("*").eq("id", productId).maybeSingle();
+    const [product] = await db
+      .select(productFull).from(products).where(eq(products.id, productId)).limit(1);
 
-    if (fetchError) throw fetchError;
     if (!product) return res.status(404).json({ message: "Product not found" });
 
-    // SKU uniqueness
     if (sku && sku !== product.sku) {
-      const { data: taken } = await supabase
-        .from("products").select("id").eq("sku", sku).maybeSingle();
+      const [taken] = await db
+        .select({ id: products.id }).from(products).where(eq(products.sku, sku)).limit(1);
       if (taken) return res.status(400).json({ message: "Product with this SKU already exists" });
     }
 
-    // Barcode uniqueness
     if (barcode && barcode !== product.barcode) {
-      const { data: taken } = await supabase
-        .from("products").select("id").eq("barcode", barcode).maybeSingle();
+      const [taken] = await db
+        .select({ id: products.id }).from(products).where(eq(products.barcode, barcode)).limit(1);
       if (taken) return res.status(400).json({ message: "Product with this barcode already exists" });
     }
 
-    // Category existence
     if (categoryId && categoryId !== product.category_id) {
-      const { data: cat } = await supabase
-        .from("categories").select("id").eq("id", categoryId).maybeSingle();
+      const [cat] = await db
+        .select({ id: categories.id }).from(categories).where(eq(categories.id, categoryId)).limit(1);
       if (!cat) return res.status(400).json({ message: "Category not found" });
     }
 
+    // camelCase keys for Drizzle .set(); fall back to existing (snake) values.
     const updates = {
-      name:                  name                  ?? product.name,
-      sku:                   sku                   ?? product.sku,
-      barcode:               barcode               !== undefined ? barcode               : product.barcode,
-      description:           description           !== undefined ? description           : product.description,
-      price:                 price                 !== undefined ? price                 : product.price,
-      cost:                  cost                  !== undefined ? cost                  : product.cost,
-      expiry_date:           expiryDate            !== undefined ? expiryDate            : product.expiry_date,
-      brand_name:            brandName             !== undefined ? brandName             : product.brand_name,
-      generic_name:          genericName           !== undefined ? genericName           : product.generic_name,
-      dosage:                dosage                !== undefined ? dosage                : product.dosage,
-      form:                  form                  !== undefined ? form                  : product.form,
-      requires_prescription: requiresPrescription  !== undefined ? requiresPrescription  : product.requires_prescription,
-      status:                status                ?? product.status,
-      category_id:           categoryId            ?? product.category_id,
+      name:                 name                 ?? product.name,
+      sku:                  sku                  ?? product.sku,
+      barcode:              barcode              !== undefined ? barcode              : product.barcode,
+      description:          description          !== undefined ? description          : product.description,
+      price:                price                !== undefined ? price                : product.price,
+      cost:                 cost                 !== undefined ? cost                 : product.cost,
+      expiryDate:           expiryDate           !== undefined ? expiryDate           : product.expiry_date,
+      brandName:            brandName            !== undefined ? brandName            : product.brand_name,
+      genericName:          genericName          !== undefined ? genericName          : product.generic_name,
+      dosage:               dosage               !== undefined ? dosage               : product.dosage,
+      form:                 form                 !== undefined ? form                 : product.form,
+      requiresPrescription: requiresPrescription !== undefined ? requiresPrescription : product.requires_prescription,
+      status:               status               ?? product.status,
+      categoryId:           categoryId           ?? product.category_id,
     };
 
-    const { error: updateError } = await supabase
-      .from("products").update(updates).eq("id", productId);
-    if (updateError) throw updateError;
+    await db.update(products).set(updates).where(eq(products.id, productId));
 
-    const { data: updatedProduct, error: fullFetchError } = await supabase
-      .from("products").select(PRODUCT_WITH_STOCKS).eq("id", productId).single();
-    if (fullFetchError) throw fullFetchError;
+    const updatedProduct = await fetchProductWithStocks(productId);
 
     await createLog(
       req, "UPDATE", "products", productId,
@@ -293,14 +293,12 @@ exports.deleteProduct = async (req, res) => {
   try {
     const productId = req.params.id;
 
-    const { data: product, error: fetchError } = await supabase
-      .from("products").select("id, name").eq("id", productId).maybeSingle();
+    const [product] = await db
+      .select({ id: products.id, name: products.name }).from(products).where(eq(products.id, productId)).limit(1);
 
-    if (fetchError) throw fetchError;
     if (!product) return res.status(404).json({ message: "Product not found" });
 
-    const { error } = await supabase.from("products").delete().eq("id", productId);
-    if (error) throw error;
+    await db.delete(products).where(eq(products.id, productId));
 
     await createLog(
       req, "DELETE", "products", productId,
@@ -318,17 +316,14 @@ exports.deleteProduct = async (req, res) => {
 
 exports.toggleProductStatus = async (req, res) => {
   try {
-    const { data: product, error: fetchError } = await supabase
-      .from("products").select("id, status").eq("id", req.params.id).maybeSingle();
+    const [product] = await db
+      .select({ id: products.id, status: products.status }).from(products).where(eq(products.id, req.params.id)).limit(1);
 
-    if (fetchError) throw fetchError;
     if (!product) return res.status(404).json({ message: "Product not found" });
 
     const newStatus = product.status === "ACTIVE" ? "INACTIVE" : "ACTIVE";
 
-    const { error } = await supabase
-      .from("products").update({ status: newStatus }).eq("id", product.id);
-    if (error) throw error;
+    await db.update(products).set({ status: newStatus }).where(eq(products.id, product.id));
 
     return res.json({
       message: `Product ${newStatus === "ACTIVE" ? "activated" : "deactivated"}`,
@@ -345,14 +340,18 @@ exports.getProductBranchStock = async (req, res) => {
   try {
     const { productId, branchId } = req.params;
 
-    const { data: branchStock, error } = await supabase
-      .from("branch_stocks")
-      .select(BRANCH_STOCK_WITH_RELATIONS)
-      .eq("product_id", productId)
-      .eq("branch_id", branchId)
-      .maybeSingle();
+    const [branchStock] = await db
+      .select({
+        ...branchStockFull,
+        product: { id: products.id, name: products.name, sku: products.sku, brand_name: products.brandName },
+        branch: branchMini,
+      })
+      .from(branchStocks)
+      .leftJoin(products, eq(branchStocks.productId, products.id))
+      .leftJoin(branches, eq(branchStocks.branchId, branches.id))
+      .where(and(eq(branchStocks.productId, productId), eq(branchStocks.branchId, branchId)))
+      .limit(1);
 
-    if (error) throw error;
     if (!branchStock) return res.status(404).json({ message: "Branch stock not found" });
 
     return res.status(200).json(branchStock);
@@ -368,48 +367,44 @@ exports.updateBranchStock = async (req, res) => {
     const { productId, branchId } = req.params;
     const { minimumStock, maximumStock, reorderPoint } = req.body;
 
-    const { data: existing } = await supabase
-      .from("branch_stocks")
-      .select("*")
-      .eq("product_id", productId)
-      .eq("branch_id", branchId)
-      .maybeSingle();
+    const [existing] = await db
+      .select(branchStockFull)
+      .from(branchStocks)
+      .where(and(eq(branchStocks.productId, productId), eq(branchStocks.branchId, branchId)))
+      .limit(1);
 
     if (!existing) {
-      // Upsert if not found
-      const { error: upsertError } = await supabase
-        .from("branch_stocks")
-        .insert({
-          product_id:    productId,
-          branch_id:     branchId,
-          current_stock: 0,
-          minimum_stock: minimumStock  || 10,
-          maximum_stock: maximumStock  || null,
-          reorder_point: reorderPoint  || 20,
-        });
-      if (upsertError) throw upsertError;
+      await db.insert(branchStocks).values({
+        productId,
+        branchId,
+        currentStock: 0,
+        minimumStock: minimumStock || 10,
+        maximumStock: maximumStock || null,
+        reorderPoint: reorderPoint || 20,
+      });
     } else {
       const updates = {
-        minimum_stock: minimumStock  !== undefined ? minimumStock  : existing.minimum_stock,
-        maximum_stock: maximumStock  !== undefined ? maximumStock  : existing.maximum_stock,
-        reorder_point: reorderPoint  !== undefined ? reorderPoint  : existing.reorder_point,
+        minimumStock: minimumStock !== undefined ? minimumStock : existing.minimum_stock,
+        maximumStock: maximumStock !== undefined ? maximumStock : existing.maximum_stock,
+        reorderPoint: reorderPoint !== undefined ? reorderPoint : existing.reorder_point,
       };
-      const { error: updateError } = await supabase
-        .from("branch_stocks")
-        .update(updates)
-        .eq("product_id", productId)
-        .eq("branch_id", branchId);
-      if (updateError) throw updateError;
+      await db
+        .update(branchStocks)
+        .set(updates)
+        .where(and(eq(branchStocks.productId, productId), eq(branchStocks.branchId, branchId)));
     }
 
-    const { data: updated, error: fetchError } = await supabase
-      .from("branch_stocks")
-      .select(BRANCH_STOCK_WITH_RELATIONS)
-      .eq("product_id", productId)
-      .eq("branch_id", branchId)
-      .single();
-
-    if (fetchError) throw fetchError;
+    const [updated] = await db
+      .select({
+        ...branchStockFull,
+        product: { id: products.id, name: products.name, sku: products.sku, brand_name: products.brandName },
+        branch: branchMini,
+      })
+      .from(branchStocks)
+      .leftJoin(products, eq(branchStocks.productId, products.id))
+      .leftJoin(branches, eq(branchStocks.branchId, branches.id))
+      .where(and(eq(branchStocks.productId, productId), eq(branchStocks.branchId, branchId)))
+      .limit(1);
 
     return res.status(200).json(updated);
   } catch (error) {
@@ -423,24 +418,24 @@ exports.getLowStockProducts = async (req, res) => {
   try {
     const { branchId } = req.query;
 
-    let query = supabase
-      .from("branch_stocks")
-      .select(`
-        *,
-        product:products (
-          *, category:categories (id, name)
-        ),
-        branch:branches (id, name, code)
-      `)
-      .order("current_stock", { ascending: true });
+    const conds = [];
+    if (branchId) conds.push(eq(branchStocks.branchId, branchId));
 
-    if (branchId) query = query.eq("branch_id", branchId);
+    const rows = await db
+      .select({
+        ...branchStockFull,
+        product: { ...productFull, category: categoryMini },
+        branch: branchMini,
+      })
+      .from(branchStocks)
+      .leftJoin(products, eq(branchStocks.productId, products.id))
+      .leftJoin(categories, eq(products.categoryId, categories.id))
+      .leftJoin(branches, eq(branchStocks.branchId, branches.id))
+      .where(conds.length ? and(...conds) : undefined)
+      .orderBy(asc(branchStocks.currentStock));
 
-    const { data: allStocks, error } = await query;
-    if (error) throw error;
-
-    // Column-to-column comparison done in JS
-    const lowStock = allStocks.filter(
+    // Column-to-column comparison done in JS (matches prior behavior).
+    const lowStock = rows.filter(
       (bs) => bs.current_stock === 0 || bs.current_stock <= bs.reorder_point
     );
 
