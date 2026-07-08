@@ -1,5 +1,9 @@
 node_modules/
 .env
+
+# drizzle-kit introspection output — regenerable via `npm run db:pull`.
+# The runtime schema lives in db/schema.js.
+drizzle/
 npm-debug.log
 yarn-error.log
 .DS_Store

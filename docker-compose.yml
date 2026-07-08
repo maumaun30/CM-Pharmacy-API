@@ -1,0 +1,25 @@
+# Local development database.
+# Mirrors the production Postgres (AWS RDS in Phase 2) so the Drizzle data
+# layer is validated against real Postgres before any cloud spend.
+services:
+  db:
+    image: postgres:16
+    container_name: cm-pharmacy-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: cmpharmacy
+      POSTGRES_PASSWORD: cmpharmacy
+      POSTGRES_DB: cm_pharmacy
+    # Host port 5544 avoids colliding with any native Postgres on 5432/5433.
+    ports:
+      - "5544:5432"
+    volumes:
+      - cm_pharmacy_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U cmpharmacy -d cm_pharmacy"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  cm_pharmacy_pgdata:
