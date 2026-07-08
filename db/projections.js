@@ -78,4 +78,27 @@ const branchStockFull = {
   updated_at: bs.updatedAt,
 };
 
-module.exports = { branchFull, userProfile, productFull, branchStockFull };
+const st = schema.stocks;
+
+// Full stocks (ledger) row (matches `stocks.select("*")`).
+const stockFull = {
+  id: st.id,
+  branch_id: st.branchId,
+  product_id: st.productId,
+  transaction_type: st.transactionType,
+  quantity: st.quantity,
+  quantity_before: st.quantityBefore,
+  quantity_after: st.quantityAfter,
+  unit_cost: st.unitCost,
+  total_cost: st.totalCost,
+  batch_number: st.batchNumber,
+  expiry_date: st.expiryDate,
+  supplier: st.supplier,
+  reference_id: st.referenceId,
+  reference_type: st.referenceType,
+  reason: st.reason,
+  performed_by: st.performedBy,
+  created_at: st.createdAt,
+};
+
+module.exports = { branchFull, userProfile, productFull, branchStockFull, stockFull };

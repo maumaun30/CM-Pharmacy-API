@@ -1,26 +1,34 @@
-const supabase = require("../config/supabase");
+const { and, eq, gte, lte, desc, asc, count } = require("drizzle-orm");
+const { db, schema } = require("../config/db");
+const { stockFull } = require("../db/projections");
 const { createLog } = require("../middleware/logMiddleware");
 const { emitStockUpdate, emitLowStockAlert, emitDashboardRefresh } = require("../utils/socket");
 
-// ─── Shared select strings ────────────────────────────────────────────────────
+const { stocks, products, users, branches, branchStocks } = schema;
 
-const STOCK_WITH_DETAILS = `
-  *,
-  product:products (id, name, sku),
-  user:users       (id, username, first_name, last_name),
-  branch:branches  (id, name, code)
-`;
+// Nested projections for the STOCK_WITH_DETAILS shape.
+const stockDetails = {
+  ...stockFull,
+  product: { id: products.id, name: products.name, sku: products.sku },
+  user: { id: users.id, username: users.username, first_name: users.firstName, last_name: users.lastName },
+  branch: { id: branches.id, name: branches.name, code: branches.code },
+};
+
+const withStockDetails = (qb) =>
+  qb
+    .leftJoin(products, eq(stocks.productId, products.id))
+    .leftJoin(users, eq(stocks.performedBy, users.id))
+    .leftJoin(branches, eq(stocks.branchId, branches.id));
 
 // ─── Helper: resolve user's active branch ────────────────────────────────────
 
 const getUserActiveBranch = async (userId) => {
-  const { data: user, error } = await supabase
-    .from("users")
-    .select("id, role, branch_id, current_branch_id")
-    .eq("id", userId)
-    .maybeSingle();
+  const [user] = await db
+    .select({ id: users.id, role: users.role, branch_id: users.branchId, current_branch_id: users.currentBranchId })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
 
-  if (error) throw error;
   if (!user) throw new Error("User not found");
 
   const activeBranchId = user.current_branch_id || user.branch_id;
@@ -48,6 +56,30 @@ const maybeEmitLowStock = (activeBranchId, branchStock, product, quantityAfter) 
   }
 };
 
+// Fetch a branch_stock row (snake_case) for a product at a branch.
+const getBranchStockRow = async (productId, branchId) => {
+  const [row] = await db
+    .select({
+      id: branchStocks.id,
+      current_stock: branchStocks.currentStock,
+      minimum_stock: branchStocks.minimumStock,
+      reorder_point: branchStocks.reorderPoint,
+    })
+    .from(branchStocks)
+    .where(and(eq(branchStocks.productId, productId), eq(branchStocks.branchId, branchId)))
+    .limit(1);
+  return row || null;
+};
+
+// Insert a stocks ledger row and return it with STOCK_WITH_DETAILS joins.
+const insertStockWithDetails = async (values) => {
+  const [inserted] = await db.insert(stocks).values(values).returning({ id: stocks.id });
+  const [stock] = await withStockDetails(
+    db.select(stockDetails).from(stocks)
+  ).where(eq(stocks.id, inserted.id)).limit(1);
+  return stock;
+};
+
 // ─── Get Product Stock History ────────────────────────────────────────────────
 
 exports.getProductStockHistory = async (req, res) => {
@@ -61,26 +93,21 @@ exports.getProductStockHistory = async (req, res) => {
     const pageSize = parseInt(limit);
     const offset   = (pageNum - 1) * pageSize;
 
-    let query = supabase
-      .from("stocks")
-      .select(STOCK_WITH_DETAILS, { count: "exact" })
-      .eq("product_id", productId)
-      .order("created_at", { ascending: false })
-      .range(offset, offset + pageSize - 1);
+    const conds = [eq(stocks.productId, productId)];
+    if (!canViewAllBranches) conds.push(eq(stocks.branchId, activeBranchId));
+    const where = and(...conds);
 
-    if (!canViewAllBranches) query = query.eq("branch_id", activeBranchId);
+    const rows = await withStockDetails(db.select(stockDetails).from(stocks))
+      .where(where)
+      .orderBy(desc(stocks.createdAt))
+      .limit(pageSize)
+      .offset(offset);
 
-    const { data: stocks, count, error } = await query;
-    if (error) throw error;
+    const [{ total }] = await db.select({ total: count() }).from(stocks).where(where);
 
     return res.status(200).json({
-      stocks,
-      pagination: {
-        total:      count,
-        page:       pageNum,
-        limit:      pageSize,
-        totalPages: Math.ceil(count / pageSize),
-      },
+      stocks: rows,
+      pagination: { total, page: pageNum, limit: pageSize, totalPages: Math.ceil(total / pageSize) },
     });
   } catch (error) {
     console.error("Error fetching stock history:", error);
@@ -92,14 +119,7 @@ exports.getProductStockHistory = async (req, res) => {
 
 exports.getAllStockTransactions = async (req, res) => {
   try {
-    const {
-      transactionType,
-      search,
-      dateFrom,
-      dateTo,
-      page  = 1,
-      limit = 50,
-    } = req.query;
+    const { transactionType, search, dateFrom, dateTo, page = 1, limit = 50 } = req.query;
 
     const { activeBranchId, canViewAllBranches } = await getUserActiveBranch(req.user.id);
 
@@ -107,29 +127,30 @@ exports.getAllStockTransactions = async (req, res) => {
     const pageSize = parseInt(limit);
     const offset   = (pageNum - 1) * pageSize;
 
-    let query = supabase
-      .from("stocks")
-      .select(STOCK_WITH_DETAILS, { count: "exact" })
-      .order("created_at", { ascending: false })
-      .range(offset, offset + pageSize - 1);
-
-    if (!canViewAllBranches)  query = query.eq("branch_id", activeBranchId);
-    if (transactionType)      query = query.eq("transaction_type", transactionType);
-    if (dateFrom)             query = query.gte("created_at", new Date(dateFrom).toISOString());
+    const conds = [];
+    if (!canViewAllBranches) conds.push(eq(stocks.branchId, activeBranchId));
+    if (transactionType) conds.push(eq(stocks.transactionType, transactionType));
+    if (dateFrom) conds.push(gte(stocks.createdAt, new Date(dateFrom).toISOString()));
     if (dateTo) {
       const endOfDay = new Date(dateTo);
       endOfDay.setHours(23, 59, 59, 999);
-      query = query.lte("created_at", endOfDay.toISOString());
+      conds.push(lte(stocks.createdAt, endOfDay.toISOString()));
     }
+    const where = conds.length ? and(...conds) : undefined;
 
-    // Product search — filter in JS post-fetch (Supabase can't filter on joined columns)
-    const { data: stocks, count, error } = await query;
-    if (error) throw error;
+    const rows = await withStockDetails(db.select(stockDetails).from(stocks))
+      .where(where)
+      .orderBy(desc(stocks.createdAt))
+      .limit(pageSize)
+      .offset(offset);
 
-    let filtered = stocks;
+    const [{ total }] = await db.select({ total: count() }).from(stocks).where(where);
+
+    // Product search — filter in JS post-fetch.
+    let filtered = rows;
     if (search) {
       const term = search.toLowerCase();
-      filtered = stocks.filter(
+      filtered = rows.filter(
         (s) =>
           s.product?.name?.toLowerCase().includes(term) ||
           s.product?.sku?.toLowerCase().includes(term)
@@ -138,12 +159,7 @@ exports.getAllStockTransactions = async (req, res) => {
 
     return res.status(200).json({
       stocks: filtered,
-      pagination: {
-        total:      count,
-        page:       pageNum,
-        limit:      pageSize,
-        totalPages: Math.ceil(count / pageSize),
-      },
+      pagination: { total, page: pageNum, limit: pageSize, totalPages: Math.ceil(total / pageSize) },
     });
   } catch (error) {
     console.error("Error fetching stock transactions:", error);
@@ -155,10 +171,7 @@ exports.getAllStockTransactions = async (req, res) => {
 
 exports.addStock = async (req, res) => {
   try {
-    const {
-      productId, quantity, unitCost, batchNumber,
-      expiryDate, supplier, transactionType = "PURCHASE",
-    } = req.body;
+    const { productId, quantity, unitCost, batchNumber, expiryDate, supplier, transactionType = "PURCHASE" } = req.body;
 
     if (!productId || !quantity || quantity <= 0) {
       return res.status(400).json({ message: "Product ID and positive quantity are required" });
@@ -169,14 +182,7 @@ exports.addStock = async (req, res) => {
       return res.status(400).json({ message: "User is not assigned to any branch" });
     }
 
-    const { data: branchStock, error: stockError } = await supabase
-      .from("branch_stocks")
-      .select("*")
-      .eq("product_id", productId)
-      .eq("branch_id", activeBranchId)
-      .maybeSingle();
-
-    if (stockError) throw stockError;
+    const branchStock = await getBranchStockRow(productId, activeBranchId);
     if (!branchStock) {
       return res.status(404).json({ message: "Product not found in this branch inventory" });
     }
@@ -184,35 +190,24 @@ exports.addStock = async (req, res) => {
     const quantityBefore = branchStock.current_stock;
     const quantityAfter  = quantityBefore + Math.abs(quantity);
 
-    // Update branch stock
-    const { error: updateError } = await supabase
-      .from("branch_stocks")
-      .update({ current_stock: quantityAfter })
-      .eq("product_id", productId)
-      .eq("branch_id", activeBranchId);
-    if (updateError) throw updateError;
+    await db.update(branchStocks)
+      .set({ currentStock: quantityAfter })
+      .where(and(eq(branchStocks.productId, productId), eq(branchStocks.branchId, activeBranchId)));
 
-    // Create stock transaction
-    const { data: stock, error: insertError } = await supabase
-      .from("stocks")
-      .insert({
-        product_id:       productId,
-        branch_id:        activeBranchId,
-        transaction_type: transactionType,
-        quantity:         Math.abs(quantity),
-        quantity_before:  quantityBefore,
-        quantity_after:   quantityAfter,
-        unit_cost:        unitCost  ? parseFloat(unitCost) : null,
-        total_cost:       unitCost  ? parseFloat(unitCost) * Math.abs(quantity) : null,
-        batch_number:     batchNumber || null,
-        expiry_date:      expiryDate  ? new Date(expiryDate).toISOString() : null,
-        supplier:         supplier    || null,
-        performed_by:     req.user.id,
-      })
-      .select(STOCK_WITH_DETAILS)
-      .single();
-
-    if (insertError) throw insertError;
+    const stock = await insertStockWithDetails({
+      productId,
+      branchId: activeBranchId,
+      transactionType,
+      quantity: Math.abs(quantity),
+      quantityBefore,
+      quantityAfter,
+      unitCost: unitCost ? parseFloat(unitCost) : null,
+      totalCost: unitCost ? parseFloat(unitCost) * Math.abs(quantity) : null,
+      batchNumber: batchNumber || null,
+      expiryDate: expiryDate ? new Date(expiryDate).toISOString() : null,
+      supplier: supplier || null,
+      performedBy: req.user.id,
+    });
 
     await createLog(
       req, "CREATE", "stocks", stock.id,
@@ -246,14 +241,7 @@ exports.adjustStock = async (req, res) => {
       return res.status(400).json({ message: "User is not assigned to any branch" });
     }
 
-    const { data: branchStock, error: stockError } = await supabase
-      .from("branch_stocks")
-      .select("*")
-      .eq("product_id", productId)
-      .eq("branch_id", activeBranchId)
-      .maybeSingle();
-
-    if (stockError) throw stockError;
+    const branchStock = await getBranchStockRow(productId, activeBranchId);
     if (!branchStock) {
       return res.status(404).json({ message: "Product not found in this branch inventory" });
     }
@@ -261,29 +249,20 @@ exports.adjustStock = async (req, res) => {
     const quantityBefore = branchStock.current_stock;
     const quantityAfter  = Math.max(0, quantityBefore + parseInt(quantity));
 
-    const { error: updateError } = await supabase
-      .from("branch_stocks")
-      .update({ current_stock: quantityAfter })
-      .eq("product_id", productId)
-      .eq("branch_id", activeBranchId);
-    if (updateError) throw updateError;
+    await db.update(branchStocks)
+      .set({ currentStock: quantityAfter })
+      .where(and(eq(branchStocks.productId, productId), eq(branchStocks.branchId, activeBranchId)));
 
-    const { data: stock, error: insertError } = await supabase
-      .from("stocks")
-      .insert({
-        product_id:       productId,
-        branch_id:        activeBranchId,
-        transaction_type: "ADJUSTMENT",
-        quantity:         parseInt(quantity),
-        quantity_before:  quantityBefore,
-        quantity_after:   quantityAfter,
-        reason:           reason || null,
-        performed_by:     req.user.id,
-      })
-      .select(STOCK_WITH_DETAILS)
-      .single();
-
-    if (insertError) throw insertError;
+    const stock = await insertStockWithDetails({
+      productId,
+      branchId: activeBranchId,
+      transactionType: "ADJUSTMENT",
+      quantity: parseInt(quantity),
+      quantityBefore,
+      quantityAfter,
+      reason: reason || null,
+      performedBy: req.user.id,
+    });
 
     await createLog(
       req, "UPDATE", "stocks", stock.id,
@@ -320,14 +299,7 @@ exports.recordStockLoss = async (req, res) => {
       return res.status(400).json({ message: "User is not assigned to any branch" });
     }
 
-    const { data: branchStock, error: stockError } = await supabase
-      .from("branch_stocks")
-      .select("*")
-      .eq("product_id", productId)
-      .eq("branch_id", activeBranchId)
-      .maybeSingle();
-
-    if (stockError) throw stockError;
+    const branchStock = await getBranchStockRow(productId, activeBranchId);
     if (!branchStock) {
       return res.status(404).json({ message: "Product not found in this branch inventory" });
     }
@@ -335,30 +307,21 @@ exports.recordStockLoss = async (req, res) => {
     const quantityBefore = branchStock.current_stock;
     const quantityAfter  = Math.max(0, quantityBefore - Math.abs(quantity));
 
-    const { error: updateError } = await supabase
-      .from("branch_stocks")
-      .update({ current_stock: quantityAfter })
-      .eq("product_id", productId)
-      .eq("branch_id", activeBranchId);
-    if (updateError) throw updateError;
+    await db.update(branchStocks)
+      .set({ currentStock: quantityAfter })
+      .where(and(eq(branchStocks.productId, productId), eq(branchStocks.branchId, activeBranchId)));
 
-    const { data: stock, error: insertError } = await supabase
-      .from("stocks")
-      .insert({
-        product_id:       productId,
-        branch_id:        activeBranchId,
-        transaction_type: transactionType,
-        quantity:         -Math.abs(quantity),
-        quantity_before:  quantityBefore,
-        quantity_after:   quantityAfter,
-        reason:           reason       || null,
-        batch_number:     batchNumber  || null,
-        performed_by:     req.user.id,
-      })
-      .select(STOCK_WITH_DETAILS)
-      .single();
-
-    if (insertError) throw insertError;
+    const stock = await insertStockWithDetails({
+      productId,
+      branchId: activeBranchId,
+      transactionType,
+      quantity: -Math.abs(quantity),
+      quantityBefore,
+      quantityAfter,
+      reason: reason || null,
+      batchNumber: batchNumber || null,
+      performedBy: req.user.id,
+    });
 
     await createLog(
       req, "CREATE", "stocks", stock.id,
@@ -383,39 +346,39 @@ exports.getLowStockProducts = async (req, res) => {
   try {
     const { activeBranchId, canViewAllBranches } = await getUserActiveBranch(req.user.id);
 
-    let query = supabase
-      .from("branch_stocks")
-      .select(`
-        *,
-        product:products!inner (id, name, sku, price, status),
-        branch:branches (id, name, code)
-      `)
-      .eq("product.status", "ACTIVE")
-      .order("current_stock", { ascending: true });
+    const conds = [eq(products.status, "ACTIVE")];
+    if (!canViewAllBranches && activeBranchId) conds.push(eq(branchStocks.branchId, activeBranchId));
 
-    if (!canViewAllBranches && activeBranchId) {
-      query = query.eq("branch_id", activeBranchId);
-    }
+    const allStocks = await db
+      .select({
+        current_stock: branchStocks.currentStock,
+        minimum_stock: branchStocks.minimumStock,
+        reorder_point: branchStocks.reorderPoint,
+        branch_id: branchStocks.branchId,
+        product: { id: products.id, name: products.name, sku: products.sku, price: products.price, status: products.status },
+        branch: { id: branches.id, name: branches.name, code: branches.code },
+      })
+      .from(branchStocks)
+      .innerJoin(products, eq(branchStocks.productId, products.id))
+      .leftJoin(branches, eq(branchStocks.branchId, branches.id))
+      .where(and(...conds))
+      .orderBy(asc(branchStocks.currentStock));
 
-    const { data: allStocks, error } = await query;
-    if (error) throw error;
-
-    // Column-to-column comparison done in JS
     const lowStockItems = allStocks.filter(
       (bs) => bs.current_stock === 0 || bs.current_stock <= bs.reorder_point
     );
 
     const formatted = lowStockItems.map((item) => ({
-      id:           item.product.id,
-      name:         item.product.name,
-      sku:          item.product.sku,
+      id:            item.product.id,
+      name:          item.product.name,
+      sku:           item.product.sku,
       current_stock: item.current_stock,
       minimum_stock: item.minimum_stock,
       reorder_point: item.reorder_point,
-      price:        parseFloat(item.product.price),
-      branchId:     item.branch_id,
-      branchName:   item.branch?.name,
-      branchCode:   item.branch?.code,
+      price:         parseFloat(item.product.price),
+      branchId:      item.branch_id,
+      branchName:    item.branch?.name,
+      branchCode:    item.branch?.code,
     }));
 
     return res.status(200).json(formatted);
@@ -431,41 +394,34 @@ exports.getStockSummary = async (req, res) => {
   try {
     const { activeBranchId, canViewAllBranches } = await getUserActiveBranch(req.user.id);
 
-    let stockQuery = supabase
-      .from("branch_stocks")
-      .select(`
-        product_id, branch_id, current_stock, minimum_stock, reorder_point,
-        product:products!inner (status)
-      `)
-      .eq("product.status", "ACTIVE");
+    const conds = [eq(products.status, "ACTIVE")];
+    if (!canViewAllBranches && activeBranchId) conds.push(eq(branchStocks.branchId, activeBranchId));
 
-    if (!canViewAllBranches && activeBranchId) {
-      stockQuery = stockQuery.eq("branch_id", activeBranchId);
-    }
+    const rows = await db
+      .select({
+        product_id: branchStocks.productId,
+        branch_id: branchStocks.branchId,
+        current_stock: branchStocks.currentStock,
+        minimum_stock: branchStocks.minimumStock,
+        reorder_point: branchStocks.reorderPoint,
+      })
+      .from(branchStocks)
+      .innerJoin(products, eq(branchStocks.productId, products.id))
+      .where(and(...conds));
 
-    const { data: branchStocks, error: stockError } = await stockQuery;
-    if (stockError) throw stockError;
+    const totalProducts = new Set(rows.map((bs) => bs.product_id)).size;
+    const outOfStock    = rows.filter((bs) => bs.current_stock === 0).length;
+    const lowStock      = rows.filter((bs) => bs.current_stock > 0 && bs.current_stock <= bs.reorder_point).length;
+    const criticalStock = rows.filter((bs) => bs.current_stock > 0 && bs.current_stock <= bs.minimum_stock).length;
 
-    // Column-to-column comparisons in JS
-    const totalProducts  = new Set(branchStocks.map((bs) => bs.product_id)).size;
-    const outOfStock     = branchStocks.filter((bs) => bs.current_stock === 0).length;
-    const lowStock       = branchStocks.filter((bs) => bs.current_stock > 0 && bs.current_stock <= bs.reorder_point).length;
-    const criticalStock  = branchStocks.filter((bs) => bs.current_stock > 0 && bs.current_stock <= bs.minimum_stock).length;
-
-    // Recent transactions count (last 7 days)
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
+    const txConds = [gte(stocks.createdAt, sevenDaysAgo)];
+    if (!canViewAllBranches && activeBranchId) txConds.push(eq(stocks.branchId, activeBranchId));
 
-    let txQuery = supabase
-      .from("stocks")
-      .select("id", { count: "exact", head: true })
-      .gte("created_at", sevenDaysAgo);
-
-    if (!canViewAllBranches && activeBranchId) {
-      txQuery = txQuery.eq("branch_id", activeBranchId);
-    }
-
-    const { count: recentTransactions, error: txError } = await txQuery;
-    if (txError) throw txError;
+    const [{ recentTransactions }] = await db
+      .select({ recentTransactions: count() })
+      .from(stocks)
+      .where(and(...txConds));
 
     return res.status(200).json({
       totalProducts,
