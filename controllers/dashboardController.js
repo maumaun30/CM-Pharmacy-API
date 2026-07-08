@@ -1,6 +1,9 @@
-const supabase = require("../config/supabase");
 const dayjs = require("dayjs");
+const { and, eq, gte, lt, lte, desc, asc, count, sql } = require("drizzle-orm");
+const { db, schema } = require("../config/db");
 const { getCached } = require("../utils/cache");
+
+const { sales, branchStocks, products, users, branches } = schema;
 
 const TTL_SHORT  = 60_000;       // 1 min  — today's sales, stock alerts
 const TTL_MEDIUM = 2 * 60_000;   // 2 min  — sales trend chart
@@ -26,30 +29,31 @@ exports.getDashboardStats = async (req, res) => {
       const tomorrow = dayjs().add(1, "day").startOf("day").toISOString();
 
       // ── 1. Today's sales totals ────────────────────────────────────────────
-      let salesQuery = supabase
-        .from("sales")
-        .select("total_amount")
-        .gte("sold_at", today)
-        .lt("sold_at", tomorrow);
+      const salesConds = [gte(sales.soldAt, today), lt(sales.soldAt, tomorrow)];
+      if (activeBranchId) salesConds.push(eq(sales.branchId, activeBranchId));
 
-      if (activeBranchId) salesQuery = salesQuery.eq("branch_id", activeBranchId);
-
-      const { data: todaySalesRows, error: salesError } = await salesQuery;
-      if (salesError) throw salesError;
+      const todaySalesRows = await db
+        .select({ total_amount: sales.totalAmount })
+        .from(sales)
+        .where(and(...salesConds));
 
       const todaySales        = todaySalesRows.reduce((sum, s) => sum + parseFloat(s.total_amount), 0);
       const todayTransactions = todaySalesRows.length;
 
-      // ── 2. Stock counts ────────────────────────────────────────────────────
-      let stockQuery = supabase
-        .from("branch_stocks")
-        .select(`current_stock, minimum_stock, reorder_point, product_id, product:products!inner (status)`)
-        .eq("product.status", "ACTIVE");
+      // ── 2. Stock counts (active products only) ─────────────────────────────
+      const stockConds = [eq(products.status, "ACTIVE")];
+      if (activeBranchId) stockConds.push(eq(branchStocks.branchId, activeBranchId));
 
-      if (activeBranchId) stockQuery = stockQuery.eq("branch_id", activeBranchId);
-
-      const { data: stockRows, error: stockError } = await stockQuery;
-      if (stockError) throw stockError;
+      const stockRows = await db
+        .select({
+          current_stock: branchStocks.currentStock,
+          minimum_stock: branchStocks.minimumStock,
+          reorder_point: branchStocks.reorderPoint,
+          product_id: branchStocks.productId,
+        })
+        .from(branchStocks)
+        .innerJoin(products, eq(branchStocks.productId, products.id))
+        .where(and(...stockConds));
 
       let lowStockCount = 0, outOfStockCount = 0, criticalStockCount = 0;
 
@@ -67,41 +71,47 @@ exports.getDashboardStats = async (req, res) => {
       }
 
       // ── 3. Total active products ───────────────────────────────────────────
-      const { count: totalProducts, error: productError } = await supabase
-        .from("products")
-        .select("id", { count: "exact", head: true })
-        .eq("status", "ACTIVE");
-
-      if (productError) throw productError;
+      const [{ totalProducts }] = await db
+        .select({ totalProducts: count() })
+        .from(products)
+        .where(eq(products.status, "ACTIVE"));
 
       // ── 4. Recent sales (last 10) ──────────────────────────────────────────
-      let recentQuery = supabase
-        .from("sales")
-        .select(`id, total_amount, sold_at, seller:users (id, username, first_name, last_name)`)
-        .order("sold_at", { ascending: false })
+      const recentConds = [];
+      if (activeBranchId) recentConds.push(eq(sales.branchId, activeBranchId));
+
+      const recentSales = await db
+        .select({
+          id: sales.id,
+          total_amount: sales.totalAmount,
+          sold_at: sales.soldAt,
+          seller: { id: users.id, username: users.username, first_name: users.firstName, last_name: users.lastName },
+        })
+        .from(sales)
+        .leftJoin(users, eq(sales.soldBy, users.id))
+        .where(recentConds.length ? and(...recentConds) : undefined)
+        .orderBy(desc(sales.soldAt))
         .limit(10);
-
-      if (activeBranchId) recentQuery = recentQuery.eq("branch_id", activeBranchId);
-
-      const { data: recentSales, error: recentError } = await recentQuery;
-      if (recentError) throw recentError;
 
       return {
         todaySales,
         todayTransactions,
         lowStockCount,
         totalProducts,
-        recentSales: recentSales.map((sale) => ({
-          id:          sale.id,
-          createdAt:   sale.sold_at,
-          totalAmount: parseFloat(sale.total_amount),
-          user: {
-            fullName: sale.seller
-              ? `${sale.seller.first_name || ""} ${sale.seller.last_name || ""}`.trim() || sale.seller.username
-              : "Unknown",
-            username: sale.seller?.username || "unknown",
-          },
-        })),
+        recentSales: recentSales.map((sale) => {
+          const seller = sale.seller?.id ? sale.seller : null;
+          return {
+            id:          sale.id,
+            createdAt:   sale.sold_at,
+            totalAmount: parseFloat(sale.total_amount),
+            user: {
+              fullName: seller
+                ? `${seller.first_name || ""} ${seller.last_name || ""}`.trim() || seller.username
+                : "Unknown",
+              username: seller?.username || "unknown",
+            },
+          };
+        }),
         outOfStockCount,
         criticalStockCount,
         branchId: activeBranchId,
@@ -125,19 +135,17 @@ exports.getWeeklySalesTrend = async (req, res) => {
     const result = await getCached(cacheKey, TTL_LONG, async () => {
       const sevenDaysAgo = dayjs().subtract(7, "day").startOf("day").toISOString();
 
-      let query = supabase
-        .from("sales")
-        .select("total_amount, sold_at")
-        .gte("sold_at", sevenDaysAgo)
-        .order("sold_at", { ascending: true });
+      const conds = [gte(sales.soldAt, sevenDaysAgo)];
+      if (activeBranchId) conds.push(eq(sales.branchId, activeBranchId));
 
-      if (activeBranchId) query = query.eq("branch_id", activeBranchId);
-
-      const { data: sales, error } = await query;
-      if (error) throw error;
+      const rows = await db
+        .select({ total_amount: sales.totalAmount, sold_at: sales.soldAt })
+        .from(sales)
+        .where(and(...conds))
+        .orderBy(asc(sales.soldAt));
 
       const byDay = {};
-      for (const sale of sales) {
+      for (const sale of rows) {
         const date = dayjs(sale.sold_at).format("YYYY-MM-DD");
         if (!byDay[date]) byDay[date] = { date, sales: 0, transactions: 0 };
         byDay[date].sales        += parseFloat(sale.total_amount);
@@ -153,6 +161,28 @@ exports.getWeeklySalesTrend = async (req, res) => {
   }
 };
 
+// Run the get_top_products RPC. p_until has a DB default (now()), so callers may
+// omit it (named-arg call). Definition: supabase/migrations/..._get_top_products.sql.
+async function runTopProducts({ branchId, since, until, limit }) {
+  const untilFrag = until ? sql`, p_until => ${until}::timestamptz` : sql``;
+  const result = await db.execute(sql`
+    select * from get_top_products(
+      p_branch_id => ${branchId}::bigint,
+      p_since => ${since}::timestamptz${untilFrag},
+      p_limit => ${limit}::integer
+    )
+  `);
+  return result.rows.map((p) => ({
+    id:                Number(p.id),
+    name:              p.name,
+    sku:               p.sku,
+    price:             parseFloat(p.price),
+    totalQuantitySold: parseInt(p.total_quantity_sold),
+    totalRevenue:      parseFloat(p.total_revenue),
+    numberOfSales:     parseInt(p.number_of_sales),
+  }));
+}
+
 // ─── Get Top Products ─────────────────────────────────────────────────────────
 
 exports.getTopProducts = async (req, res) => {
@@ -162,64 +192,9 @@ exports.getTopProducts = async (req, res) => {
     const cacheKey = `dashboard:top-products:${activeBranchId ?? "all"}:${limit}`;
     const thirtyDaysAgo  = dayjs().subtract(30, "day").startOf("day").toISOString();
 
-    /*
-      Supabase JS can't do multi-table aggregates, so this uses an RPC.
-      Create it once in Supabase SQL Editor:
-
-      create or replace function get_top_products(
-        p_branch_id     bigint  default null,
-        p_since         timestamptz,
-        p_limit         integer default 10
-      )
-      returns table (
-        id                  bigint,
-        name                text,
-        sku                 text,
-        price               numeric,
-        total_quantity_sold bigint,
-        total_revenue       numeric,
-        number_of_sales     bigint
-      ) as $$
-      begin
-        return query
-        select
-          p.id,
-          p.name,
-          p.sku,
-          p.price,
-          sum(si.quantity)::bigint                as total_quantity_sold,
-          sum(si.quantity * si.price)             as total_revenue,
-          count(distinct si.sale_id)::bigint      as number_of_sales
-        from products p
-        inner join sale_items si on p.id = si.product_id
-        inner join sales s       on si.sale_id = s.id
-        where s.sold_at >= p_since
-          and (p_branch_id is null or s.branch_id = p_branch_id)
-        group by p.id, p.name, p.sku, p.price
-        order by total_quantity_sold desc
-        limit p_limit;
-      end;
-      $$ language plpgsql;
-    */
-
-    const result = await getCached(cacheKey, TTL_LONG, async () => {
-      const { data: topProducts, error } = await supabase.rpc("get_top_products", {
-        p_branch_id: activeBranchId,
-        p_since:     thirtyDaysAgo,
-        p_limit:     limit,
-      });
-      if (error) throw error;
-
-      return topProducts.map((p) => ({
-        id:                p.id,
-        name:              p.name,
-        sku:               p.sku,
-        price:             parseFloat(p.price),
-        totalQuantitySold: parseInt(p.total_quantity_sold),
-        totalRevenue:      parseFloat(p.total_revenue),
-        numberOfSales:     parseInt(p.number_of_sales),
-      }));
-    });
+    const result = await getCached(cacheKey, TTL_LONG, () =>
+      runTopProducts({ branchId: activeBranchId, since: thirtyDaysAgo, limit })
+    );
 
     return res.json(result);
   } catch (error) {
@@ -229,35 +204,6 @@ exports.getTopProducts = async (req, res) => {
 };
 
 // ─── Get Analytics Top Products (period-aware) ────────────────────────────────
-//
-// Requires an updated Supabase RPC that accepts p_until:
-//
-//   create or replace function get_top_products(
-//     p_branch_id  bigint      default null,
-//     p_since      timestamptz default now() - interval '30 days',
-//     p_until      timestamptz default now(),
-//     p_limit      integer     default 10
-//   )
-//   returns table (
-//     id bigint, name text, sku text, price numeric,
-//     total_quantity_sold bigint, total_revenue numeric, number_of_sales bigint
-//   ) as $$
-//   begin
-//     return query
-//     select p.id, p.name, p.sku, p.price,
-//            sum(si.quantity)::bigint             as total_quantity_sold,
-//            sum(si.quantity * si.price)          as total_revenue,
-//            count(distinct si.sale_id)::bigint   as number_of_sales
-//     from products p
-//     inner join sale_items si on p.id = si.product_id
-//     inner join sales s       on si.sale_id = s.id
-//     where s.sold_at >= p_since and s.sold_at <= p_until
-//       and (p_branch_id is null or s.branch_id = p_branch_id)
-//     group by p.id, p.name, p.sku, p.price
-//     order by total_quantity_sold desc
-//     limit p_limit;
-//   end;
-//   $$ language plpgsql;
 
 exports.getAnalyticsTopProducts = async (req, res) => {
   try {
@@ -283,39 +229,14 @@ exports.getAnalyticsTopProducts = async (req, res) => {
 
     const cacheKey = `dashboard:analytics-top:${activeBranchId ?? "all"}:${period}:${offset}:${limit}`;
 
-    const result = await getCached(cacheKey, TTL_MEDIUM, async () => {
-      // Try the updated RPC signature with p_until first
-      let { data: topProducts, error } = await supabase.rpc("get_top_products", {
-        p_branch_id: activeBranchId,
-        p_since:     rangeStart.toISOString(),
-        p_until:     rangeEnd.toISOString(),
-        p_limit:     limit,
-      });
-
-      // Fallback: old signature without p_until (PGRST202 = function not found)
-      if (error && error.code === "PGRST202") {
-        console.warn(
-          "[analytics-top-products] RPC missing p_until param — falling back to since-only. " +
-          "Run migration 20260428000000_update_get_top_products.sql to enable period scoping."
-        );
-        ({ data: topProducts, error } = await supabase.rpc("get_top_products", {
-          p_branch_id: activeBranchId,
-          p_since:     rangeStart.toISOString(),
-          p_limit:     limit,
-        }));
-      }
-      if (error) throw error;
-
-      return (topProducts || []).map((p) => ({
-        id:                p.id,
-        name:              p.name,
-        sku:               p.sku,
-        price:             parseFloat(p.price),
-        totalQuantitySold: parseInt(p.total_quantity_sold),
-        totalRevenue:      parseFloat(p.total_revenue),
-        numberOfSales:     parseInt(p.number_of_sales),
-      }));
-    });
+    const result = await getCached(cacheKey, TTL_MEDIUM, () =>
+      runTopProducts({
+        branchId: activeBranchId,
+        since: rangeStart.toISOString(),
+        until: rangeEnd.toISOString(),
+        limit,
+      })
+    );
 
     return res.json(result);
   } catch (error) {
@@ -332,23 +253,26 @@ exports.getStockAlerts = async (req, res) => {
     const cacheKey = `dashboard:stock-alerts:${activeBranchId ?? "all"}`;
 
     const result = await getCached(cacheKey, TTL_SHORT, async () => {
-      let query = supabase
-        .from("branch_stocks")
-        .select(`
-          id, product_id, branch_id,
-          current_stock, minimum_stock, reorder_point,
-          product:products!inner (id, name, sku, brand_name, status),
-          branch:branches (id, name, code)
-        `)
-        .eq("product.status", "ACTIVE")
-        .order("current_stock", { ascending: true })
-        .order("branch_id", { ascending: true })
+      const conds = [eq(products.status, "ACTIVE")];
+      if (activeBranchId) conds.push(eq(branchStocks.branchId, activeBranchId));
+
+      const allStocks = await db
+        .select({
+          id: branchStocks.id,
+          product_id: branchStocks.productId,
+          branch_id: branchStocks.branchId,
+          current_stock: branchStocks.currentStock,
+          minimum_stock: branchStocks.minimumStock,
+          reorder_point: branchStocks.reorderPoint,
+          product: { id: products.id, name: products.name, sku: products.sku, brand_name: products.brandName, status: products.status },
+          branch: { id: branches.id, name: branches.name, code: branches.code },
+        })
+        .from(branchStocks)
+        .innerJoin(products, eq(branchStocks.productId, products.id))
+        .leftJoin(branches, eq(branchStocks.branchId, branches.id))
+        .where(and(...conds))
+        .orderBy(asc(branchStocks.currentStock), asc(branchStocks.branchId))
         .limit(20);
-
-      if (activeBranchId) query = query.eq("branch_id", activeBranchId);
-
-      const { data: allStocks, error } = await query;
-      if (error) throw error;
 
       return allStocks
         .filter((bs) => bs.current_stock === 0 || bs.current_stock <= bs.reorder_point)
@@ -369,7 +293,7 @@ exports.getStockAlerts = async (req, res) => {
             sku:       alert.product.sku,
             brandName: alert.product.brand_name,
           },
-          branch: alert.branch,
+          branch: alert.branch?.id ? alert.branch : null,
         }));
     });
 
@@ -406,22 +330,19 @@ exports.getSalesTrend = async (req, res) => {
         rangeEnd   = dayjs().add(offset, "year").endOf("year");
       }
 
-      let query = supabase
-        .from("sales")
-        .select("id, total_amount, sold_at")
-        .gte("sold_at", rangeStart.toISOString())
-        .lte("sold_at", rangeEnd.toISOString())
-        .order("sold_at", { ascending: true });
+      const conds = [gte(sales.soldAt, rangeStart.toISOString()), lte(sales.soldAt, rangeEnd.toISOString())];
+      if (activeBranchId) conds.push(eq(sales.branchId, activeBranchId));
 
-      if (activeBranchId) query = query.eq("branch_id", activeBranchId);
-
-      const { data: sales, error } = await query;
-      if (error) throw error;
+      const rows = await db
+        .select({ id: sales.id, total_amount: sales.totalAmount, sold_at: sales.soldAt })
+        .from(sales)
+        .where(and(...conds))
+        .orderBy(asc(sales.soldAt));
 
       const points = buildSkeleton(mode, rangeStart);
       let totalSales = 0, totalTransactions = 0;
 
-      for (const sale of sales) {
+      for (const sale of rows) {
         const key   = getDateKey(sale.sold_at, mode);
         const point = points.find((p) => p.dateKey === key);
         if (point) {
@@ -457,44 +378,24 @@ function buildSkeleton(mode, rangeStart) {
   if (mode === "daily") {
     for (let h = 0; h < 24; h++) {
       const hour = String(h).padStart(2, "0");
-      points.push({
-        label:        dayjs(rangeStart).hour(h).format("h A"),
-        dateKey:      hour,
-        sales:        0,
-        transactions: 0,
-      });
+      points.push({ label: dayjs(rangeStart).hour(h).format("h A"), dateKey: hour, sales: 0, transactions: 0 });
     }
   } else if (mode === "weekly") {
     for (let d = 0; d < 7; d++) {
       const day = dayjs(rangeStart).add(d, "day");
-      points.push({
-        label:        day.format("ddd"),
-        dateKey:      day.format("YYYY-MM-DD"),
-        sales:        0,
-        transactions: 0,
-      });
+      points.push({ label: day.format("ddd"), dateKey: day.format("YYYY-MM-DD"), sales: 0, transactions: 0 });
     }
   } else if (mode === "monthly") {
     const daysInMonth = dayjs(rangeStart).daysInMonth();
     for (let d = 0; d < daysInMonth; d++) {
       const day = dayjs(rangeStart).add(d, "day");
-      points.push({
-        label:        day.format("D"),
-        dateKey:      day.format("YYYY-MM-DD"),
-        sales:        0,
-        transactions: 0,
-      });
+      points.push({ label: day.format("D"), dateKey: day.format("YYYY-MM-DD"), sales: 0, transactions: 0 });
     }
   } else {
     // annual — 12 monthly buckets
     for (let m = 0; m < 12; m++) {
       const month = dayjs(rangeStart).add(m, "month");
-      points.push({
-        label:        month.format("MMM"),
-        dateKey:      month.format("YYYY-MM"),
-        sales:        0,
-        transactions: 0,
-      });
+      points.push({ label: month.format("MMM"), dateKey: month.format("YYYY-MM"), sales: 0, transactions: 0 });
     }
   }
 
