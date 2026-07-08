@@ -79,6 +79,28 @@ const branchStockFull = {
 };
 
 const st = schema.stocks;
+const d = schema.discounts;
+
+// Full discounts row (matches `discounts.select("*")`).
+const discountFull = {
+  id: d.id,
+  name: d.name,
+  description: d.description,
+  discount_type: d.discountType,
+  discount_value: d.discountValue,
+  discount_category: d.discountCategory,
+  start_date: d.startDate,
+  end_date: d.endDate,
+  is_enabled: d.isEnabled,
+  requires_verification: d.requiresVerification,
+  applicable_to: d.applicableTo,
+  minimum_purchase_amount: d.minimumPurchaseAmount,
+  maximum_discount_amount: d.maximumDiscountAmount,
+  priority: d.priority,
+  stackable: d.stackable,
+  created_at: d.createdAt,
+  updated_at: d.updatedAt,
+};
 
 // Full stocks (ledger) row (matches `stocks.select("*")`).
 const stockFull = {
@@ -101,4 +123,4 @@ const stockFull = {
   created_at: st.createdAt,
 };
 
-module.exports = { branchFull, userProfile, productFull, branchStockFull, stockFull };
+module.exports = { branchFull, userProfile, productFull, branchStockFull, stockFull, discountFull };

@@ -1,41 +1,51 @@
-const supabase = require("../config/supabase");
+const { and, eq, or, ilike, inArray, desc } = require("drizzle-orm");
+const { db, schema } = require("../config/db");
+const { discountFull } = require("../db/projections");
 const { createLog } = require("../middleware/logMiddleware");
 
-// ─── Shared select for discounts with junction table joins ────────────────────
+const { discounts, products, categories, productDiscounts, categoryDiscounts } = schema;
 
-const DISCOUNT_WITH_JOINS = `
-  *,
-  products:product_discounts (
-    product:products (id, name, sku)
-  ),
-  categories:category_discounts (
-    category:categories (id, name)
-  )
-`;
+// Attach flattened `products[]` / `categories[]` to discount rows,
+// reproducing the supabase DISCOUNT_WITH_JOINS + flattenDiscount output.
+async function attachAssociations(discountRows, withPrice = false) {
+  if (discountRows.length === 0) return discountRows;
+  const ids = discountRows.map((d) => d.id);
 
-const DISCOUNT_WITH_JOINS_PRICE = `
-  *,
-  products:product_discounts (
-    product:products (id, name, sku, price)
-  ),
-  categories:category_discounts (
-    category:categories (id, name)
-  )
-`;
+  const prodSel = withPrice
+    ? { id: products.id, name: products.name, sku: products.sku, price: products.price }
+    : { id: products.id, name: products.name, sku: products.sku };
 
-// Flatten nested junction table results into flat arrays
-function flattenDiscount(d) {
-  return {
+  const prodRows = await db
+    .select({ discount_id: productDiscounts.discountId, product: prodSel })
+    .from(productDiscounts)
+    .innerJoin(products, eq(productDiscounts.productId, products.id))
+    .where(inArray(productDiscounts.discountId, ids));
+
+  const catRows = await db
+    .select({ discount_id: categoryDiscounts.discountId, category: { id: categories.id, name: categories.name } })
+    .from(categoryDiscounts)
+    .innerJoin(categories, eq(categoryDiscounts.categoryId, categories.id))
+    .where(inArray(categoryDiscounts.discountId, ids));
+
+  const prodByD = new Map();
+  for (const r of prodRows) {
+    if (!prodByD.has(r.discount_id)) prodByD.set(r.discount_id, []);
+    prodByD.get(r.discount_id).push(r.product);
+  }
+  const catByD = new Map();
+  for (const r of catRows) {
+    if (!catByD.has(r.discount_id)) catByD.set(r.discount_id, []);
+    catByD.get(r.discount_id).push(r.category);
+  }
+
+  return discountRows.map((d) => ({
     ...d,
-    products:   (d.products   || []).map((r) => r.product).filter(Boolean),
-    categories: (d.categories || []).map((r) => r.category).filter(Boolean),
-  };
+    products: prodByD.get(d.id) || [],
+    categories: catByD.get(d.id) || [],
+  }));
 }
 
-// ─── Active discount date filter helper ──────────────────────────────────────
-// Applied in JS after fetch since Supabase JS can't express OR groups with
-// mixed null/date conditions cleanly in a single filter chain.
-
+// Active-date filter (JS: complex date/null logic).
 function isDiscountActive(d) {
   const now = new Date();
   const started = !d.start_date || new Date(d.start_date) <= now;
@@ -43,44 +53,40 @@ function isDiscountActive(d) {
   return d.is_enabled && started && notExpired;
 }
 
+// Validate a list of ids exists in a table; returns true if all present.
+async function allExist(table, ids) {
+  const rows = await db.select({ id: table.id }).from(table).where(inArray(table.id, ids));
+  return rows.length === ids.length;
+}
+
 // ─── Get All Discounts ────────────────────────────────────────────────────────
 
 exports.getAllDiscounts = async (req, res) => {
   try {
-    const {
-      discountCategory,
-      discountType,
-      isEnabled,
-      requiresVerification,
-      activeOnly,
-      search,
-    } = req.query;
+    const { discountCategory, discountType, isEnabled, requiresVerification, activeOnly, search } = req.query;
 
-    let query = supabase
-      .from("discounts")
-      .select(DISCOUNT_WITH_JOINS)
-      .order("priority",    { ascending: false })
-      .order("created_at",  { ascending: false });
-
-    if (discountCategory)       query = query.eq("discount_category", discountCategory);
-    if (discountType)           query = query.eq("discount_type", discountType);
-    if (isEnabled !== undefined) query = query.eq("is_enabled", isEnabled === "true");
+    const conds = [];
+    if (discountCategory) conds.push(eq(discounts.discountCategory, discountCategory));
+    if (discountType) conds.push(eq(discounts.discountType, discountType));
+    if (isEnabled !== undefined) conds.push(eq(discounts.isEnabled, isEnabled === "true"));
     if (requiresVerification !== undefined)
-      query = query.eq("requires_verification", requiresVerification === "true");
+      conds.push(eq(discounts.requiresVerification, requiresVerification === "true"));
     if (search)
-      query = query.or(`name.ilike.%${search}%,description.ilike.%${search}%`);
+      conds.push(or(ilike(discounts.name, `%${search}%`), ilike(discounts.description, `%${search}%`)));
 
-    const { data, error } = await query;
-    if (error) throw error;
+    const rows = await db
+      .select(discountFull)
+      .from(discounts)
+      .where(conds.length ? and(...conds) : undefined)
+      .orderBy(desc(discounts.priority), desc(discounts.createdAt));
 
-    let discounts = data.map(flattenDiscount);
+    let result = await attachAssociations(rows);
 
-    // activeOnly filter done in JS (complex date/null logic)
     if (activeOnly === "true") {
-      discounts = discounts.filter(isDiscountActive);
+      result = result.filter(isDiscountActive);
     }
 
-    return res.status(200).json(discounts);
+    return res.status(200).json(result);
   } catch (error) {
     return res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -90,16 +96,16 @@ exports.getAllDiscounts = async (req, res) => {
 
 exports.getDiscountById = async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from("discounts")
-      .select(DISCOUNT_WITH_JOINS_PRICE)
-      .eq("id", req.params.id)
-      .maybeSingle();
+    const [discount] = await db
+      .select(discountFull)
+      .from(discounts)
+      .where(eq(discounts.id, req.params.id))
+      .limit(1);
 
-    if (error) throw error;
-    if (!data) return res.status(404).json({ message: "Discount not found" });
+    if (!discount) return res.status(404).json({ message: "Discount not found" });
 
-    return res.status(200).json(flattenDiscount(data));
+    const [full] = await attachAssociations([discount], true);
+    return res.status(200).json(full);
   } catch (error) {
     return res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -116,7 +122,6 @@ exports.createDiscount = async (req, res) => {
       productIds, categoryIds,
     } = req.body;
 
-    // Validation
     if (!name || !discountType || discountValue == null || !discountCategory) {
       return res.status(400).json({
         message: "Missing required fields: name, discountType, discountValue, and discountCategory are required",
@@ -132,84 +137,51 @@ exports.createDiscount = async (req, res) => {
       return res.status(400).json({ message: "Start date must be before end date" });
     }
 
-    // Check name uniqueness
-    const { data: existing } = await supabase
-      .from("discounts")
-      .select("id")
-      .eq("name", name)
-      .maybeSingle();
+    const [existing] = await db
+      .select({ id: discounts.id }).from(discounts).where(eq(discounts.name, name)).limit(1);
     if (existing) {
       return res.status(400).json({ message: "Discount with this name already exists" });
     }
 
-    // Insert discount
-    const { data: newDiscount, error: insertError } = await supabase
-      .from("discounts")
-      .insert({
+    const [newDiscount] = await db
+      .insert(discounts)
+      .values({
         name,
         description,
-        discount_type:            discountType,
-        discount_value:           discountValue,
-        discount_category:        discountCategory,
-        start_date:               startDate || null,
-        end_date:                 endDate || null,
-        is_enabled:               isEnabled !== undefined ? isEnabled : true,
-        requires_verification:    requiresVerification || false,
-        applicable_to:            applicableTo || "ALL_PRODUCTS",
-        minimum_purchase_amount:  minimumPurchaseAmount || null,
-        maximum_discount_amount:  maximumDiscountAmount || null,
-        priority:                 priority || 0,
-        stackable:                stackable || false,
+        discountType,
+        discountValue,
+        discountCategory,
+        startDate: startDate || null,
+        endDate: endDate || null,
+        isEnabled: isEnabled !== undefined ? isEnabled : true,
+        requiresVerification: requiresVerification || false,
+        applicableTo: applicableTo || "ALL_PRODUCTS",
+        minimumPurchaseAmount: minimumPurchaseAmount || null,
+        maximumDiscountAmount: maximumDiscountAmount || null,
+        priority: priority || 0,
+        stackable: stackable || false,
       })
-      .select("id")
-      .single();
+      .returning({ id: discounts.id });
 
-    if (insertError) throw insertError;
-
-    // Associate categories
     if (applicableTo === "CATEGORIES" && categoryIds?.length > 0) {
-      const { data: validCats } = await supabase
-        .from("categories")
-        .select("id")
-        .in("id", categoryIds);
-
-      if (!validCats || validCats.length !== categoryIds.length) {
+      if (!(await allExist(categories, categoryIds))) {
         return res.status(400).json({ message: "One or more category IDs are invalid" });
       }
-
-      const { error: catError } = await supabase
-        .from("category_discounts")
-        .insert(categoryIds.map((cid) => ({ category_id: cid, discount_id: newDiscount.id })));
-      if (catError) throw catError;
+      await db.insert(categoryDiscounts).values(categoryIds.map((cid) => ({ categoryId: cid, discountId: newDiscount.id })));
     }
 
-    // Associate products
     if (applicableTo === "SPECIFIC_PRODUCTS" && productIds?.length > 0) {
-      const { data: validProds } = await supabase
-        .from("products")
-        .select("id")
-        .in("id", productIds);
-
-      if (!validProds || validProds.length !== productIds.length) {
+      if (!(await allExist(products, productIds))) {
         return res.status(400).json({ message: "One or more product IDs are invalid" });
       }
-
-      const { error: prodError } = await supabase
-        .from("product_discounts")
-        .insert(productIds.map((pid) => ({ product_id: pid, discount_id: newDiscount.id })));
-      if (prodError) throw prodError;
+      await db.insert(productDiscounts).values(productIds.map((pid) => ({ productId: pid, discountId: newDiscount.id })));
     }
 
-    // Return full record with associations
-    const { data: full, error: fetchError } = await supabase
-      .from("discounts")
-      .select(DISCOUNT_WITH_JOINS)
-      .eq("id", newDiscount.id)
-      .single();
+    const [discount] = await db
+      .select(discountFull).from(discounts).where(eq(discounts.id, newDiscount.id)).limit(1);
+    const [full] = await attachAssociations([discount]);
 
-    if (fetchError) throw fetchError;
-
-    return res.status(201).json(flattenDiscount(full));
+    return res.status(201).json(full);
   } catch (error) {
     return res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -227,22 +199,14 @@ exports.updateDiscount = async (req, res) => {
     } = req.body;
     const discountId = req.params.id;
 
-    const { data: discount, error: fetchError } = await supabase
-      .from("discounts")
-      .select("*")
-      .eq("id", discountId)
-      .maybeSingle();
+    const [discount] = await db
+      .select(discountFull).from(discounts).where(eq(discounts.id, discountId)).limit(1);
 
-    if (fetchError) throw fetchError;
     if (!discount) return res.status(404).json({ message: "Discount not found" });
 
-    // Name uniqueness check
     if (name && name !== discount.name) {
-      const { data: taken } = await supabase
-        .from("discounts")
-        .select("id")
-        .eq("name", name)
-        .maybeSingle();
+      const [taken] = await db
+        .select({ id: discounts.id }).from(discounts).where(eq(discounts.name, name)).limit(1);
       if (taken) return res.status(400).json({ message: "Discount with this name already exists" });
     }
 
@@ -262,71 +226,53 @@ exports.updateDiscount = async (req, res) => {
       return res.status(400).json({ message: "Start date must be before end date" });
     }
 
+    // camelCase keys for Drizzle .set(); fall back to existing (snake) values.
     const updates = {
-      name:                     name                     ?? discount.name,
-      description:              description              !== undefined ? description              : discount.description,
-      discount_type:            discountType             ?? discount.discount_type,
-      discount_value:           discountValue            !== undefined ? discountValue            : discount.discount_value,
-      discount_category:        discountCategory         ?? discount.discount_category,
-      start_date:               startDate                !== undefined ? startDate                : discount.start_date,
-      end_date:                 endDate                  !== undefined ? endDate                  : discount.end_date,
-      is_enabled:               isEnabled                !== undefined ? isEnabled                : discount.is_enabled,
-      requires_verification:    requiresVerification     !== undefined ? requiresVerification     : discount.requires_verification,
-      applicable_to:            applicableTo             ?? discount.applicable_to,
-      minimum_purchase_amount:  minimumPurchaseAmount    !== undefined ? minimumPurchaseAmount    : discount.minimum_purchase_amount,
-      maximum_discount_amount:  maximumDiscountAmount    !== undefined ? maximumDiscountAmount    : discount.maximum_discount_amount,
-      priority:                 priority                 !== undefined ? priority                 : discount.priority,
-      stackable:                stackable                !== undefined ? stackable                : discount.stackable,
+      name:                  name                  ?? discount.name,
+      description:           description            !== undefined ? description            : discount.description,
+      discountType:          discountType           ?? discount.discount_type,
+      discountValue:         discountValue          !== undefined ? discountValue          : discount.discount_value,
+      discountCategory:      discountCategory       ?? discount.discount_category,
+      startDate:             startDate              !== undefined ? startDate              : discount.start_date,
+      endDate:               endDate                !== undefined ? endDate                : discount.end_date,
+      isEnabled:             isEnabled              !== undefined ? isEnabled              : discount.is_enabled,
+      requiresVerification:  requiresVerification   !== undefined ? requiresVerification   : discount.requires_verification,
+      applicableTo:          applicableTo           ?? discount.applicable_to,
+      minimumPurchaseAmount: minimumPurchaseAmount  !== undefined ? minimumPurchaseAmount  : discount.minimum_purchase_amount,
+      maximumDiscountAmount: maximumDiscountAmount  !== undefined ? maximumDiscountAmount  : discount.maximum_discount_amount,
+      priority:              priority               !== undefined ? priority               : discount.priority,
+      stackable:             stackable              !== undefined ? stackable              : discount.stackable,
     };
 
-    const { error: updateError } = await supabase
-      .from("discounts")
-      .update(updates)
-      .eq("id", discountId);
-    if (updateError) throw updateError;
+    await db.update(discounts).set(updates).where(eq(discounts.id, discountId));
 
-    // Sync category associations
+    // Sync category associations.
     if (categoryIds !== undefined) {
-      await supabase.from("category_discounts").delete().eq("discount_id", discountId);
-
+      await db.delete(categoryDiscounts).where(eq(categoryDiscounts.discountId, discountId));
       if (categoryIds.length > 0) {
-        const { data: validCats } = await supabase
-          .from("categories").select("id").in("id", categoryIds);
-        if (!validCats || validCats.length !== categoryIds.length) {
+        if (!(await allExist(categories, categoryIds))) {
           return res.status(400).json({ message: "One or more category IDs are invalid" });
         }
-        const { error: catError } = await supabase
-          .from("category_discounts")
-          .insert(categoryIds.map((cid) => ({ category_id: cid, discount_id: discountId })));
-        if (catError) throw catError;
+        await db.insert(categoryDiscounts).values(categoryIds.map((cid) => ({ categoryId: cid, discountId })));
       }
     }
 
-    // Sync product associations
+    // Sync product associations.
     if (productIds !== undefined) {
-      await supabase.from("product_discounts").delete().eq("discount_id", discountId);
-
+      await db.delete(productDiscounts).where(eq(productDiscounts.discountId, discountId));
       if (productIds.length > 0) {
-        const { data: validProds } = await supabase
-          .from("products").select("id").in("id", productIds);
-        if (!validProds || validProds.length !== productIds.length) {
+        if (!(await allExist(products, productIds))) {
           return res.status(400).json({ message: "One or more product IDs are invalid" });
         }
-        const { error: prodError } = await supabase
-          .from("product_discounts")
-          .insert(productIds.map((pid) => ({ product_id: pid, discount_id: discountId })));
-        if (prodError) throw prodError;
+        await db.insert(productDiscounts).values(productIds.map((pid) => ({ productId: pid, discountId })));
       }
     }
 
-    const { data: full, error: fullFetchError } = await supabase
-      .from("discounts")
-      .select(DISCOUNT_WITH_JOINS)
-      .eq("id", discountId)
-      .single();
-    if (fullFetchError) throw fullFetchError;
+    const [updated] = await db
+      .select(discountFull).from(discounts).where(eq(discounts.id, discountId)).limit(1);
+    const [full] = await attachAssociations([updated]);
 
-    return res.status(200).json(flattenDiscount(full));
+    return res.status(200).json(full);
   } catch (error) {
     return res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -338,18 +284,13 @@ exports.deleteDiscount = async (req, res) => {
   try {
     const discountId = req.params.id;
 
-    const { data: discount, error: fetchError } = await supabase
-      .from("discounts")
-      .select("id")
-      .eq("id", discountId)
-      .maybeSingle();
+    const [discount] = await db
+      .select({ id: discounts.id }).from(discounts).where(eq(discounts.id, discountId)).limit(1);
 
-    if (fetchError) throw fetchError;
     if (!discount) return res.status(404).json({ message: "Discount not found" });
 
-    // Junction rows are deleted via ON DELETE CASCADE in the DB
-    const { error } = await supabase.from("discounts").delete().eq("id", discountId);
-    if (error) throw error;
+    // Junction rows are deleted via ON DELETE CASCADE in the DB.
+    await db.delete(discounts).where(eq(discounts.id, discountId));
 
     return res.status(200).json({ message: "Discount deleted successfully" });
   } catch (error) {
@@ -361,22 +302,17 @@ exports.deleteDiscount = async (req, res) => {
 
 exports.toggleDiscountStatus = async (req, res) => {
   try {
-    const { data: discount, error: fetchError } = await supabase
-      .from("discounts")
-      .select("id, is_enabled")
-      .eq("id", req.params.id)
-      .maybeSingle();
+    const [discount] = await db
+      .select({ id: discounts.id, is_enabled: discounts.isEnabled })
+      .from(discounts)
+      .where(eq(discounts.id, req.params.id))
+      .limit(1);
 
-    if (fetchError) throw fetchError;
     if (!discount) return res.status(404).json({ message: "Discount not found" });
 
     const newStatus = !discount.is_enabled;
 
-    const { error } = await supabase
-      .from("discounts")
-      .update({ is_enabled: newStatus })
-      .eq("id", discount.id);
-    if (error) throw error;
+    await db.update(discounts).set({ isEnabled: newStatus }).where(eq(discounts.id, discount.id));
 
     return res.json({
       message: `Discount ${newStatus ? "enabled" : "disabled"}`,
@@ -393,28 +329,23 @@ exports.getApplicableDiscounts = async (req, res) => {
   try {
     const { productId } = req.params;
 
-    const { data: product, error: productError } = await supabase
-      .from("products")
-      .select("id, category_id")
-      .eq("id", productId)
-      .maybeSingle();
+    const [product] = await db
+      .select({ id: products.id, category_id: products.categoryId })
+      .from(products)
+      .where(eq(products.id, productId))
+      .limit(1);
 
-    if (productError) throw productError;
     if (!product) return res.status(404).json({ message: "Product not found" });
 
-    // Fetch all enabled discounts with their associations
-    const { data, error } = await supabase
-      .from("discounts")
-      .select(DISCOUNT_WITH_JOINS)
-      .eq("is_enabled", true)
-      .order("priority", { ascending: false });
+    const rows = await db
+      .select(discountFull)
+      .from(discounts)
+      .where(eq(discounts.isEnabled, true))
+      .orderBy(desc(discounts.priority));
 
-    if (error) throw error;
+    const enriched = await attachAssociations(rows);
 
-    const discounts = data.map(flattenDiscount);
-
-    // Filter: active dates + applicable to this product
-    const applicable = discounts.filter((d) => {
+    const applicable = enriched.filter((d) => {
       if (!isDiscountActive(d)) return false;
       if (d.applicable_to === "ALL_PRODUCTS") return true;
       if (d.applicable_to === "SPECIFIC_PRODUCTS") {
@@ -438,20 +369,16 @@ exports.calculateProductDiscount = async (req, res) => {
   try {
     const { productId, discountId } = req.params;
 
-    const [
-      { data: product, error: pe },
-      { data: discountRaw, error: de },
-    ] = await Promise.all([
-      supabase.from("products").select("id, name, price, category_id").eq("id", productId).maybeSingle(),
-      supabase.from("discounts").select(DISCOUNT_WITH_JOINS).eq("id", discountId).maybeSingle(),
+    const [[product], [discountRaw]] = await Promise.all([
+      db.select({ id: products.id, name: products.name, price: products.price, category_id: products.categoryId })
+        .from(products).where(eq(products.id, productId)).limit(1),
+      db.select(discountFull).from(discounts).where(eq(discounts.id, discountId)).limit(1),
     ]);
 
-    if (pe) throw pe;
-    if (de) throw de;
-    if (!product)      return res.status(404).json({ message: "Product not found" });
-    if (!discountRaw)  return res.status(404).json({ message: "Discount not found" });
+    if (!product) return res.status(404).json({ message: "Product not found" });
+    if (!discountRaw) return res.status(404).json({ message: "Discount not found" });
 
-    const discount = flattenDiscount(discountRaw);
+    const [discount] = await attachAssociations([discountRaw]);
 
     if (!discount.is_enabled) {
       return res.status(400).json({ message: "Discount is not enabled" });
@@ -465,7 +392,6 @@ exports.calculateProductDiscount = async (req, res) => {
       return res.status(400).json({ message: "Discount has expired" });
     }
 
-    // Check applicability
     if (discount.applicable_to === "SPECIFIC_PRODUCTS") {
       const ok = discount.products.some((p) => String(p.id) === String(productId));
       if (!ok) return res.status(400).json({ message: "Discount not applicable to this product" });
@@ -474,7 +400,6 @@ exports.calculateProductDiscount = async (req, res) => {
       if (!ok) return res.status(400).json({ message: "Discount not applicable to this product" });
     }
 
-    // Calculate
     let discountAmount =
       discount.discount_type === "PERCENTAGE"
         ? (product.price * discount.discount_value) / 100
@@ -487,14 +412,14 @@ exports.calculateProductDiscount = async (req, res) => {
     const finalPrice = Math.max(0, product.price - discountAmount);
 
     return res.status(200).json({
-      productId:     product.id,
-      productName:   product.name,
-      originalPrice: parseFloat(product.price),
+      productId:      product.id,
+      productName:    product.name,
+      originalPrice:  parseFloat(product.price),
       discountAmount: parseFloat(discountAmount.toFixed(2)),
-      finalPrice:    parseFloat(finalPrice.toFixed(2)),
-      discountName:  discount.name,
-      discountType:  discount.discount_type,
-      discountValue: parseFloat(discount.discount_value),
+      finalPrice:     parseFloat(finalPrice.toFixed(2)),
+      discountName:   discount.name,
+      discountType:   discount.discount_type,
+      discountValue:  parseFloat(discount.discount_value),
     });
   } catch (error) {
     return res.status(500).json({ message: "Server error", error: error.message });
