@@ -1,5 +1,9 @@
 const jwt = require("jsonwebtoken");
-const supabase = require("../config/supabase");
+const { alias } = require("drizzle-orm/pg-core");
+const { eq } = require("drizzle-orm");
+const { db, schema } = require("../config/db");
+
+const { users, branches } = schema;
 
 // ─── Verify JWT token ─────────────────────────────────────────────────────────
 
@@ -14,24 +18,32 @@ exports.authenticateUser = async (req, res, next) => {
     const token = authHeader.split(" ")[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
-    const { data: user, error } = await supabase
-      .from("users")
-      .select(`
-        id, username, role, is_active,
-        branch_id, current_branch_id,
-        branch:branches!users_branch_id_fkey               (id, name, code),
-        currentBranch:branches!users_current_branch_id_fkey (id, name, code)
-      `)
-      .eq("id", decoded.id)
-      .maybeSingle();
+    // Two aliased self-joins to branches: home branch + active (current) branch.
+    const homeBranch = alias(branches, "home_branch");
+    const curBranch = alias(branches, "cur_branch");
 
-    if (error) throw error;
+    const [user] = await db
+      .select({
+        id: users.id,
+        username: users.username,
+        role: users.role,
+        isActive: users.isActive,
+        branchId: users.branchId,
+        currentBranchId: users.currentBranchId,
+        branch: { id: homeBranch.id, name: homeBranch.name, code: homeBranch.code },
+        currentBranch: { id: curBranch.id, name: curBranch.name, code: curBranch.code },
+      })
+      .from(users)
+      .leftJoin(homeBranch, eq(users.branchId, homeBranch.id))
+      .leftJoin(curBranch, eq(users.currentBranchId, curBranch.id))
+      .where(eq(users.id, decoded.id))
+      .limit(1);
 
     if (!user) {
       return res.status(401).json({ message: "Invalid token, user not found" });
     }
 
-    if (!user.is_active) {
+    if (!user.isActive) {
       return res.status(401).json({ message: "Account is inactive, access denied" });
     }
 
@@ -39,10 +51,12 @@ exports.authenticateUser = async (req, res, next) => {
       id:              user.id,
       username:        user.username,
       role:            user.role,
-      branchId:        user.branch_id,
-      currentBranchId: user.current_branch_id,
-      branch:          user.branch,
-      currentBranch:   user.currentBranch,
+      branchId:        user.branchId,
+      currentBranchId: user.currentBranchId,
+      // Collapse the joined object to null when there is no related branch,
+      // matching the previous supabase nested-select semantics.
+      branch:          user.branch?.id ? user.branch : null,
+      currentBranch:   user.currentBranch?.id ? user.currentBranch : null,
     };
 
     next();

@@ -1,4 +1,6 @@
-const supabase = require("../config/supabase");
+const { db, schema } = require("../config/db");
+
+const { logs } = schema;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -12,20 +14,19 @@ const getIpAddress = (req) =>
 const getUserAgent = (req) => req.headers["user-agent"] || null;
 
 // ─── createLog ────────────────────────────────────────────────────────────────
-// Drop-in replacement for the Sequelize version.
-// Signature is identical — all controllers call this without changes.
+// Signature is unchanged — all controllers call this without modification.
 
 const createLog = async (req, action, module, recordId, description, metadata = null) => {
   try {
-    await supabase.from("logs").insert({
-      user_id:     req.user?.id   || null,
+    await db.insert(logs).values({
+      userId:      req.user?.id   || null,
       action,
       module,
-      record_id:   recordId       || null,
+      recordId:    recordId       || null,
       description: description    || null,
       metadata:    metadata       || null,
-      ip_address:  getIpAddress(req),
-      user_agent:  getUserAgent(req),
+      ipAddress:   getIpAddress(req),
+      userAgent:   getUserAgent(req),
     });
   } catch (error) {
     // Logging should never crash the main request

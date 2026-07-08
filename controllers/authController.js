@@ -1,7 +1,12 @@
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
-const supabase = require("../config/supabase");
+const { and, or, eq } = require("drizzle-orm");
+const { alias } = require("drizzle-orm/pg-core");
+const { db, schema } = require("../config/db");
+const { branchFull, userProfile } = require("../db/projections");
 const { createLog } = require("../middleware/logMiddleware");
+
+const { users, branches } = schema;
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -32,11 +37,11 @@ exports.register = async (req, res) => {
     }
 
     // Check duplicate username or email
-    const { data: existing } = await supabase
-      .from("users")
-      .select("id")
-      .or(`username.eq.${username},email.eq.${email}`)
-      .maybeSingle();
+    const [existing] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(or(eq(users.username, username), eq(users.email, email)))
+      .limit(1);
 
     if (existing) {
       return res
@@ -47,19 +52,16 @@ exports.register = async (req, res) => {
     const salt = await bcrypt.genSalt(10);
     const hashedPassword = await bcrypt.hash(password, salt);
 
-    const { data: newUser, error } = await supabase
-      .from("users")
-      .insert({
+    const [newUser] = await db
+      .insert(users)
+      .values({
         username,
         email,
         password: hashedPassword,
         role: role || "cashier",
-        is_active: true,
+        isActive: true,
       })
-      .select("id, username, email, role")
-      .single();
-
-    if (error) throw error;
+      .returning({ id: users.id, username: users.username, email: users.email, role: users.role });
 
     const token = signToken(newUser);
 
@@ -87,13 +89,18 @@ exports.login = async (req, res) => {
         .json({ message: "Username and password are required" });
     }
 
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("id, username, email, role, password, is_active")
-      .eq("username", username)
-      .maybeSingle();
-
-    if (error) throw error;
+    const [user] = await db
+      .select({
+        id: users.id,
+        username: users.username,
+        email: users.email,
+        role: users.role,
+        password: users.password,
+        isActive: users.isActive,
+      })
+      .from(users)
+      .where(eq(users.username, username))
+      .limit(1);
 
     const validPassword =
       user && (await bcrypt.compare(password, user.password));
@@ -102,7 +109,7 @@ exports.login = async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    if (!user.is_active) {
+    if (!user.isActive) {
       return res
         .status(401)
         .json({ message: "Account is inactive. Contact administrator." });
@@ -135,13 +142,12 @@ exports.login = async (req, res) => {
 
 exports.getProfile = async (req, res) => {
   try {
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("id, username, email, role, first_name, last_name, contact_number, branch_id, current_branch_id, is_active, created_at, updated_at")
-      .eq("id", req.user.id)
-      .maybeSingle();
+    const [user] = await db
+      .select(userProfile)
+      .from(users)
+      .where(eq(users.id, req.user.id))
+      .limit(1);
 
-    if (error) throw error;
     if (!user) return res.status(404).json({ message: "User not found" });
 
     return res.status(200).json(user);
@@ -159,32 +165,31 @@ exports.updateProfile = async (req, res) => {
     const { username, email, password } = req.body;
     const userId = req.user.id;
 
-    const { data: user, error: fetchError } = await supabase
-      .from("users")
-      .select("*")
-      .eq("id", userId)
-      .maybeSingle();
+    const [user] = await db
+      .select({ id: users.id, username: users.username, email: users.email, role: users.role })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
 
-    if (fetchError) throw fetchError;
     if (!user) return res.status(404).json({ message: "User not found" });
 
     // Check username uniqueness
     if (username && username !== user.username) {
-      const { data: taken } = await supabase
-        .from("users")
-        .select("id")
-        .eq("username", username)
-        .maybeSingle();
+      const [taken] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.username, username))
+        .limit(1);
       if (taken) return res.status(400).json({ message: "Username already taken" });
     }
 
     // Check email uniqueness
     if (email && email !== user.email) {
-      const { data: taken } = await supabase
-        .from("users")
-        .select("id")
-        .eq("email", email)
-        .maybeSingle();
+      const [taken] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.email, email))
+        .limit(1);
       if (taken) return res.status(400).json({ message: "Email already in use" });
     }
 
@@ -196,14 +201,11 @@ exports.updateProfile = async (req, res) => {
       updates.password = await bcrypt.hash(password, salt);
     }
 
-    const { data: updatedUser, error: updateError } = await supabase
-      .from("users")
-      .update(updates)
-      .eq("id", userId)
-      .select("id, username, email, role")
-      .single();
-
-    if (updateError) throw updateError;
+    const [updatedUser] = await db
+      .update(users)
+      .set(updates)
+      .where(eq(users.id, userId))
+      .returning({ id: users.id, username: users.username, email: users.email, role: users.role });
 
     await createLog(
       req,
@@ -238,24 +240,20 @@ exports.switchBranch = async (req, res) => {
         .json({ message: "Only admins can switch branches" });
     }
 
-    const { data: branch, error: branchError } = await supabase
-      .from("branches")
-      .select("*")
-      .eq("id", branchId)
-      .eq("is_active", true)
-      .maybeSingle();
+    const [branch] = await db
+      .select(branchFull)
+      .from(branches)
+      .where(and(eq(branches.id, branchId), eq(branches.isActive, true)))
+      .limit(1);
 
-    if (branchError) throw branchError;
     if (!branch) {
       return res.status(404).json({ message: "Branch not found or inactive" });
     }
 
-    const { error } = await supabase
-      .from("users")
-      .update({ current_branch_id: branchId })
-      .eq("id", userId);
-
-    if (error) throw error;
+    await db
+      .update(users)
+      .set({ currentBranchId: branchId })
+      .where(eq(users.id, userId));
 
     await createLog(
       req,
@@ -284,12 +282,10 @@ exports.resetToBranchHome = async (req, res) => {
   try {
     const userId = req.user.id;
 
-    const { error } = await supabase
-      .from("users")
-      .update({ current_branch_id: null })
-      .eq("id", userId);
-
-    if (error) throw error;
+    await db
+      .update(users)
+      .set({ currentBranchId: null })
+      .where(eq(users.id, userId));
 
     return res.status(200).json({ message: "Reset to home branch" });
   } catch (error) {
@@ -304,26 +300,43 @@ exports.resetToBranchHome = async (req, res) => {
 
 exports.getCurrentUser = async (req, res) => {
   try {
-    // Supabase foreign key joins — requires FK relationships set up in Supabase dashboard
-    const { data: user, error } = await supabase
-      .from("users")
-      .select(`
-        id, username, email, role,
-        first_name, last_name, contact_number,
-        branch_id, current_branch_id,
-        is_active, created_at, updated_at,
-        branch:branches!users_branch_id_fkey (
-          id, name, code, is_active, email, phone
-        ),
-        currentBranch:branches!users_current_branch_id_fkey (
-          id, name, code, is_active, email, phone
-        )
-      `)
-      .eq("id", req.user.id)
-      .maybeSingle();
+    const homeBranch = alias(branches, "home_branch");
+    const curBranch = alias(branches, "cur_branch");
 
-    if (error) throw error;
+    const [user] = await db
+      .select({
+        id: users.id,
+        username: users.username,
+        email: users.email,
+        role: users.role,
+        first_name: users.firstName,
+        last_name: users.lastName,
+        contact_number: users.contactNumber,
+        branch_id: users.branchId,
+        current_branch_id: users.currentBranchId,
+        is_active: users.isActive,
+        created_at: users.createdAt,
+        updated_at: users.updatedAt,
+        branch: {
+          id: homeBranch.id, name: homeBranch.name, code: homeBranch.code,
+          is_active: homeBranch.isActive, email: homeBranch.email, phone: homeBranch.phone,
+        },
+        currentBranch: {
+          id: curBranch.id, name: curBranch.name, code: curBranch.code,
+          is_active: curBranch.isActive, email: curBranch.email, phone: curBranch.phone,
+        },
+      })
+      .from(users)
+      .leftJoin(homeBranch, eq(users.branchId, homeBranch.id))
+      .leftJoin(curBranch, eq(users.currentBranchId, curBranch.id))
+      .where(eq(users.id, req.user.id))
+      .limit(1);
+
     if (!user) return res.status(404).json({ message: "User not found" });
+
+    // Collapse joined objects to null when no related branch (supabase semantics).
+    user.branch = user.branch?.id ? user.branch : null;
+    user.currentBranch = user.currentBranch?.id ? user.currentBranch : null;
 
     return res.status(200).json(user);
   } catch (error) {
@@ -350,13 +363,18 @@ exports.loginWithPin = async (req, res) => {
       return res.status(400).json({ message: "PIN must be 4–6 digits" });
     }
 
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("id, username, email, role, pin, is_active")
-      .eq("username", username)
-      .maybeSingle();
-
-    if (error) throw error;
+    const [user] = await db
+      .select({
+        id: users.id,
+        username: users.username,
+        email: users.email,
+        role: users.role,
+        pin: users.pin,
+        isActive: users.isActive,
+      })
+      .from(users)
+      .where(eq(users.username, username))
+      .limit(1);
 
     const validPin =
       user && user.pin && (await bcrypt.compare(pin, user.pin));
@@ -365,7 +383,7 @@ exports.loginWithPin = async (req, res) => {
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
-    if (!user.is_active) {
+    if (!user.isActive) {
       return res
         .status(401)
         .json({ message: "Account is inactive. Contact administrator." });
@@ -405,13 +423,12 @@ exports.setPin = async (req, res) => {
       return res.status(400).json({ message: "PIN must be 4–6 digits" });
     }
 
-    const { data: user, error: fetchError } = await supabase
-      .from("users")
-      .select("id, username")
-      .eq("id", userId)
-      .maybeSingle();
+    const [user] = await db
+      .select({ id: users.id, username: users.username })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
 
-    if (fetchError) throw fetchError;
     if (!user) return res.status(404).json({ message: "User not found" });
 
     let hashedPin = null;
@@ -420,12 +437,10 @@ exports.setPin = async (req, res) => {
       hashedPin = await bcrypt.hash(pin, salt);
     }
 
-    const { error: updateError } = await supabase
-      .from("users")
-      .update({ pin: hashedPin })
-      .eq("id", userId);
-
-    if (updateError) throw updateError;
+    await db
+      .update(users)
+      .set({ pin: hashedPin })
+      .where(eq(users.id, userId));
 
     await createLog(
       req,
