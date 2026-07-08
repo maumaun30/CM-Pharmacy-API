@@ -1,0 +1,19 @@
+# Copy to terraform.tfvars and adjust. terraform.tfvars is gitignored.
+
+aws_region  = "ap-southeast-1"
+name_prefix = "cm-pharmacy"
+environment = "prod"
+
+# ── Foundation stage (network + RDS only) ────────────────────────────────────
+# Keep NAT off until ECS is added (saves ~USD 32/mo).
+enable_nat_gateway = false
+
+# RDS
+db_instance_class = "db.t4g.micro"
+db_multi_az       = false
+
+# ── Initial validation from your laptop (OPTIONAL, TEMPORARY) ─────────────────
+# To point your local API at RDS before ECS exists, set the flag true and your
+# public IP below (get it: `curl ifconfig.me`). Turn BOTH off once ECS is live.
+db_publicly_accessible = false
+my_ip_cidr             = "" # e.g. "203.0.113.4/32"

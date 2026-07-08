@@ -1,0 +1,13 @@
+# Local state (contains resource metadata; move to S3 backend for teams).
+*.tfstate
+*.tfstate.*
+.terraform/
+.terraform.lock.hcl
+
+# Never commit real variable values (may contain IPs, etc.).
+terraform.tfvars
+*.auto.tfvars
+
+# Plan output
+*.tfplan
+crash.log
