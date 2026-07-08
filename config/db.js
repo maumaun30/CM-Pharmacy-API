@@ -11,7 +11,7 @@ const schema = require("../db/schema");
 pg.types.setTypeParser(1700, (v) => (v === null ? null : parseFloat(v)));
 
 // Single shared connection pool for the whole API process.
-// Replaces config/supabase.js. In Phase 2 (AWS), DATABASE_URL points at RDS;
+// This is the app's only data layer. In Phase 2 (AWS), DATABASE_URL points at RDS;
 // keep `max` modest so (Fargate tasks × pool size) stays under RDS
 // max_connections — or front RDS with RDS Proxy when task count grows.
 const pool = new Pool({

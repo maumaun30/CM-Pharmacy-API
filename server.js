@@ -1,16 +1,15 @@
 const app = require("./app");
-const supabase = require("./config/supabase");
+const { pool } = require("./config/db");
 
 const PORT = process.env.PORT || 3000;
 
 const testDbConnection = async () => {
   try {
-    // A lightweight query to verify Supabase connectivity
-    const { error } = await supabase.from("users").select("id").limit(1);
-    if (error) throw error;
-    console.log("Supabase connection established successfully.");
+    // A lightweight query to verify Postgres connectivity.
+    await pool.query("select 1");
+    console.log("Postgres connection established successfully.");
   } catch (error) {
-    console.error("Unable to connect to Supabase:", error.message);
+    console.error("Unable to connect to Postgres:", error.message);
     process.exit(1);
   }
 };
