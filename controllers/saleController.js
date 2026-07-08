@@ -1,109 +1,24 @@
-const supabase = require("../config/supabase");
+const { and, eq, inArray, desc, sql } = require("drizzle-orm");
+const { db, schema } = require("../config/db");
 const { createLog } = require("../middleware/logMiddleware");
+const { dbErrorMessage } = require("../utils/dbError");
 const {
   emitNewSale,
   emitDashboardRefresh,
   emitStockUpdate,
 } = require("../utils/socket");
 
+const { users, products, branchStocks, sales, saleItems, branches, discounts } = schema;
+
 // ─────────────────────────────────────────────────────────────────────────────
-// createSale uses a Postgres RPC for atomicity.
-//
-// Create this function once in Supabase SQL Editor:
-//
-// create or replace function create_sale(
-//   p_sold_by      bigint,
-//   p_branch_id    bigint,
-//   p_subtotal     numeric,
-//   p_discount     numeric,
-//   p_total        numeric,
-//   p_cash         numeric,
-//   p_change       numeric,
-//   p_items        jsonb
-//   -- [{ product_id, quantity, price, discounted_price, discount_id, discount_amount }]
-// )
-// returns bigint as $$
-// declare
-//   v_sale_id       bigint;
-//   v_item          jsonb;
-//   v_current_stock integer;
-//   v_new_stock     integer;
-// begin
-//   -- 1. Create sale header
-//   insert into sales (
-//     sold_by, branch_id, subtotal, total_discount,
-//     total_amount, cash_amount, change_amount
-//   )
-//   values (
-//     p_sold_by, p_branch_id, p_subtotal, p_discount,
-//     p_total, p_cash, p_change
-//   )
-//   returning id into v_sale_id;
-//
-//   -- 2. Process each cart item
-//   for v_item in select * from jsonb_array_elements(p_items) loop
-//     -- Create sale item
-//     insert into sale_items (
-//       sale_id, product_id, quantity, price,
-//       discounted_price, discount_id, discount_amount
-//     )
-//     values (
-//       v_sale_id,
-//       (v_item->>'product_id')::bigint,
-//       (v_item->>'quantity')::integer,
-//       (v_item->>'price')::numeric,
-//       nullif(v_item->>'discounted_price', '')::numeric,
-//       nullif(v_item->>'discount_id', '')::bigint,
-//       (v_item->>'discount_amount')::numeric
-//     );
-//
-//     -- Lock and fetch current branch stock
-//     select current_stock into v_current_stock
-//     from branch_stocks
-//     where product_id = (v_item->>'product_id')::bigint
-//       and branch_id  = p_branch_id
-//     for update;
-//
-//     if v_current_stock is null then
-//       raise exception 'BranchStock not found for product % at branch %',
-//         (v_item->>'product_id'), p_branch_id;
-//     end if;
-//
-//     v_new_stock := v_current_stock - (v_item->>'quantity')::integer;
-//
-//     if v_new_stock < 0 then
-//       raise exception 'Insufficient stock for product %. Available: %, Requested: %',
-//         (v_item->>'product_id'), v_current_stock, (v_item->>'quantity')::integer;
-//     end if;
-//
-//     -- Deduct stock
-//     update branch_stocks
-//     set current_stock = v_new_stock
-//     where product_id = (v_item->>'product_id')::bigint
-//       and branch_id  = p_branch_id;
-//
-//     -- Log stock movement
-//     insert into stocks (
-//       product_id, branch_id, transaction_type,
-//       quantity, quantity_before, quantity_after,
-//       reference_id, reference_type, performed_by
-//     )
-//     values (
-//       (v_item->>'product_id')::bigint,
-//       p_branch_id,
-//       'SALE',
-//       -(v_item->>'quantity')::integer,
-//       v_current_stock,
-//       v_new_stock,
-//       v_sale_id,
-//       'sale',
-//       p_sold_by
-//     );
-//   end loop;
-//
-//   return v_sale_id;
-// end;
-// $$ language plpgsql;
+// createSale uses the create_sale Postgres RPC for atomicity.
+// The function definition lives in db/functions/create_sale.sql (loaded by
+// db/bootstrap.sh). It atomically:
+//   1. inserts the sale header
+//   2. inserts each sale_item
+//   3. locks branch_stocks FOR UPDATE, validates + deducts stock, and RAISEs
+//      "Insufficient stock for product %" if any product is short
+// Keep db/functions/create_sale.sql in sync with any changes to sale/stock logic.
 // ─────────────────────────────────────────────────────────────────────────────
 
 exports.createSale = async (req, res) => {
@@ -111,19 +26,15 @@ exports.createSale = async (req, res) => {
     const { cart, subtotal, totalDiscount, total, cashAmount } = req.body;
 
     // ── 1. Resolve user and active branch ────────────────────────────────────
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select("id, role, branch_id, current_branch_id")
-      .eq("id", req.user.id)
-      .maybeSingle();
-
-    if (userError) throw userError;
+    const [user] = await db
+      .select({ id: users.id, role: users.role, branch_id: users.branchId, current_branch_id: users.currentBranchId })
+      .from(users)
+      .where(eq(users.id, req.user.id))
+      .limit(1);
 
     const activeBranchId = user.current_branch_id || user.branch_id;
     if (!activeBranchId) {
-      return res
-        .status(400)
-        .json({ message: "User is not assigned to any branch" });
+      return res.status(400).json({ message: "User is not assigned to any branch" });
     }
 
     // ── 2. Input validation ──────────────────────────────────────────────────
@@ -134,30 +45,34 @@ exports.createSale = async (req, res) => {
     for (const item of cart) {
       const productId = item.productId || item.product?.id;
       if (!productId || !item.quantity || item.quantity <= 0) {
-        return res.status(400).json({
-          message: "Invalid cart item format",
-          receivedItem: item,
-        });
+        return res.status(400).json({ message: "Invalid cart item format", receivedItem: item });
       }
     }
 
-    // ── 3. Fetch products with branch stock ───────────────────────────────────
+    // ── 3. Fetch products with branch stock (inner join to the active branch) ──
     const productIds = cart.map((item) => item.productId || item.product.id);
 
-    const { data: products, error: productError } = await supabase
-      .from("products")
-      .select(
-        `
-        id, name, price,
-        branch_stocks!inner (branch_id, current_stock)
-      `,
+    const rows = await db
+      .select({
+        id: products.id,
+        name: products.name,
+        price: products.price,
+        branch_id: branchStocks.branchId,
+        current_stock: branchStocks.currentStock,
+      })
+      .from(products)
+      .innerJoin(
+        branchStocks,
+        and(eq(branchStocks.productId, products.id), eq(branchStocks.branchId, activeBranchId))
       )
-      .in("id", productIds)
-      .eq("branch_stocks.branch_id", activeBranchId);
+      .where(inArray(products.id, productIds));
 
-    if (productError) throw productError;
-
-    const productMap = new Map(products.map((p) => [p.id, p]));
+    const productMap = new Map(
+      rows.map((r) => [
+        r.id,
+        { id: r.id, name: r.name, price: r.price, branch_stocks: [{ branch_id: r.branch_id, current_stock: r.current_stock }] },
+      ])
+    );
 
     // ── 4. Validate stock and calculate totals ────────────────────────────────
     let calculatedSubtotal = 0;
@@ -168,16 +83,12 @@ exports.createSale = async (req, res) => {
       const product = productMap.get(productId);
 
       if (!product) {
-        return res
-          .status(404)
-          .json({ message: `Product ID ${productId} not found` });
+        return res.status(404).json({ message: `Product ID ${productId} not found` });
       }
 
       const branchStock = product.branch_stocks[0];
       if (!branchStock) {
-        return res.status(404).json({
-          message: `Product "${product.name}" not available at this branch`,
-        });
+        return res.status(404).json({ message: `Product "${product.name}" not available at this branch` });
       }
 
       if (item.quantity > branchStock.current_stock) {
@@ -190,8 +101,7 @@ exports.createSale = async (req, res) => {
 
       if (item.discountId && item.discountedPrice) {
         calculatedTotalDiscount +=
-          (Number(product.price) - Number(item.discountedPrice)) *
-          item.quantity;
+          (Number(product.price) - Number(item.discountedPrice)) * item.quantity;
       }
     }
 
@@ -199,21 +109,10 @@ exports.createSale = async (req, res) => {
 
     // Validate totals (allow small floating point differences)
     if (subtotal && Math.abs(calculatedSubtotal - subtotal) > 0.01) {
-      return res.status(400).json({
-        message: "Subtotal mismatch",
-        calculated: calculatedSubtotal,
-        received: subtotal,
-      });
+      return res.status(400).json({ message: "Subtotal mismatch", calculated: calculatedSubtotal, received: subtotal });
     }
-    if (
-      totalDiscount &&
-      Math.abs(calculatedTotalDiscount - totalDiscount) > 0.01
-    ) {
-      return res.status(400).json({
-        message: "Total discount mismatch",
-        calculated: calculatedTotalDiscount,
-        received: totalDiscount,
-      });
+    if (totalDiscount && Math.abs(calculatedTotalDiscount - totalDiscount) > 0.01) {
+      return res.status(400).json({ message: "Total discount mismatch", calculated: calculatedTotalDiscount, received: totalDiscount });
     }
 
     // ── 5. Build RPC item payload ─────────────────────────────────────────────
@@ -221,42 +120,34 @@ exports.createSale = async (req, res) => {
       const productId = item.productId || item.product.id;
       const product = productMap.get(productId);
       const price = Number(product.price);
-      const discountedPrice = item.discountedPrice
-        ? Number(item.discountedPrice)
-        : null;
+      const discountedPrice = item.discountedPrice ? Number(item.discountedPrice) : null;
 
       return {
         product_id: productId,
         quantity: item.quantity,
         price,
-        discounted_price:
-          discountedPrice !== null ? String(discountedPrice) : "",
+        discounted_price: discountedPrice !== null ? String(discountedPrice) : "",
         discount_id: item.discountId ? String(item.discountId) : "",
-        discount_amount: discountedPrice
-          ? (price - discountedPrice) * item.quantity
-          : 0,
+        discount_amount: discountedPrice ? (price - discountedPrice) * item.quantity : 0,
       };
     });
 
     // ── 6. Execute atomic sale via RPC ────────────────────────────────────────
     const parsedCash = cashAmount ? parseFloat(cashAmount) : null;
-    const { data: saleId, error: rpcError } = await supabase.rpc(
-      "create_sale",
-      {
-        p_sold_by: req.user.id,
-        p_branch_id: activeBranchId,
-        p_subtotal: calculatedSubtotal,
-        p_discount: calculatedTotalDiscount,
-        p_total: calculatedTotal,
-        // p_cash:      cashAmount || null,
-        // p_change:    cashAmount ? cashAmount - calculatedTotal : null,
-        p_cash: parsedCash,
-        p_change: parsedCash ? parsedCash - calculatedTotal : null,
-        p_items: rpcItems,
-      },
-    );
-
-    if (rpcError) throw rpcError;
+    const result = await db.execute(sql`
+      select create_sale(
+        ${req.user.id}::bigint,
+        ${activeBranchId}::bigint,
+        ${calculatedSubtotal}::numeric,
+        ${calculatedTotalDiscount}::numeric,
+        ${calculatedTotal}::numeric,
+        ${parsedCash}::numeric,
+        ${parsedCash !== null ? parsedCash - calculatedTotal : null}::numeric,
+        ${JSON.stringify(rpcItems)}::jsonb
+      ) as sale_id
+    `);
+    // create_sale returns bigint; node-pg yields it as a string.
+    const saleId = Number(result.rows[0].sale_id);
 
     // ── 7. Audit log ──────────────────────────────────────────────────────────
     await createLog(
@@ -265,50 +156,44 @@ exports.createSale = async (req, res) => {
       "sales",
       saleId,
       `Completed sale #${saleId} - Total: ₱${calculatedTotal.toFixed(2)}`,
-      {
-        items: cart.length,
-        total: calculatedTotal,
-        discount: calculatedTotalDiscount,
-        branch: activeBranchId,
-      },
+      { items: cart.length, total: calculatedTotal, discount: calculatedTotalDiscount, branch: activeBranchId }
     );
 
     // ── 8. Fetch sale + seller for socket emission ─────────────────────────────
-    const { data: completeSale } = await supabase
-      .from("sales")
-      .select(
-        `
-        id, total_amount, sold_at, branch_id,
-        seller:users (id, username, first_name, last_name)
-      `,
-      )
-      .eq("id", saleId)
-      .maybeSingle();
+    const [completeSale] = await db
+      .select({
+        id: sales.id,
+        total_amount: sales.totalAmount,
+        sold_at: sales.soldAt,
+        branch_id: sales.branchId,
+        seller: { id: users.id, username: users.username, first_name: users.firstName, last_name: users.lastName },
+      })
+      .from(sales)
+      .leftJoin(users, eq(sales.soldBy, users.id))
+      .where(eq(sales.id, saleId))
+      .limit(1);
 
     // ── 9. Fetch updated stock levels for socket emissions ────────────────────
-    const { data: updatedStocks } = await supabase
-      .from("branch_stocks")
-      .select("product_id, current_stock")
-      .eq("branch_id", activeBranchId)
-      .in("product_id", productIds);
+    const updatedStocks = await db
+      .select({ product_id: branchStocks.productId, current_stock: branchStocks.currentStock })
+      .from(branchStocks)
+      .where(and(eq(branchStocks.branchId, activeBranchId), inArray(branchStocks.productId, productIds)));
 
-    const stockMap = Object.fromEntries(
-      (updatedStocks || []).map((s) => [s.product_id, s.current_stock]),
-    );
+    const stockMap = Object.fromEntries(updatedStocks.map((s) => [s.product_id, s.current_stock]));
 
     // ── 10. Socket emissions ───────────────────────────────────────────────────
     if (completeSale) {
+      const seller = completeSale.seller?.id ? completeSale.seller : null;
       emitNewSale({
         id: completeSale.id,
         totalAmount: parseFloat(completeSale.total_amount),
         soldAt: completeSale.sold_at,
         branchId: completeSale.branch_id,
         user: {
-          fullName: completeSale.seller
-            ? `${completeSale.seller.first_name || ""} ${completeSale.seller.last_name || ""}`.trim() ||
-              completeSale.seller.username
+          fullName: seller
+            ? `${seller.first_name || ""} ${seller.last_name || ""}`.trim() || seller.username
             : "Unknown",
-          username: completeSale.seller?.username || "unknown",
+          username: seller?.username || "unknown",
         },
       });
 
@@ -319,9 +204,7 @@ exports.createSale = async (req, res) => {
       const productId = item.productId || item.product.id;
       const newStock = stockMap[productId];
       emitStockUpdate(activeBranchId, { productId, newStock });
-      console.log(
-        `📦 Stock update emitted: Product ${productId} -> ${newStock} units (Branch ${activeBranchId})`,
-      );
+      console.log(`📦 Stock update emitted: Product ${productId} -> ${newStock} units (Branch ${activeBranchId})`);
     }
 
     // ── 11. Response ───────────────────────────────────────────────────────────
@@ -336,9 +219,7 @@ exports.createSale = async (req, res) => {
     });
   } catch (error) {
     console.error("Sale error:", error);
-    return res
-      .status(500)
-      .json({ message: "Server error", error: error.message });
+    return res.status(500).json({ message: "Server error", error: dbErrorMessage(error) });
   }
 };
 
@@ -348,97 +229,121 @@ exports.createSale = async (req, res) => {
 
 exports.getSales = async (req, res) => {
   try {
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select("id, role, branch_id, current_branch_id")
-      .eq("id", req.user.id)
-      .maybeSingle();
-
-    if (userError) throw userError;
+    const [user] = await db
+      .select({ id: users.id, role: users.role, branch_id: users.branchId, current_branch_id: users.currentBranchId })
+      .from(users)
+      .where(eq(users.id, req.user.id))
+      .limit(1);
 
     const activeBranchId = user.current_branch_id || user.branch_id;
     if (!activeBranchId) {
-      return res
-        .status(400)
-        .json({ message: "User is not assigned to any branch" });
+      return res.status(400).json({ message: "User is not assigned to any branch" });
     }
 
-    let query = supabase
-      .from("sales")
-      .select(
-        `
-        id, subtotal, total_discount, total_amount,
-        cash_amount, change_amount, sold_at, sold_by, branch_id, status,
-        branch:branches (id, name, code),
-        seller:users (id, username, email, first_name, last_name),
-        items:sale_items (
-          id, quantity, price, discounted_price, discount_amount,
-          product:products (id, name),
-          discount:discounts (id, name, discount_type, discount_value)
-        )
-      `,
-      )
-      .order("sold_at", { ascending: false });
+    // Branch filter — mirror original logic.
+    const conds = [];
+    if (user.role !== "admin") conds.push(eq(sales.branchId, activeBranchId));
+    else if (user.current_branch_id) conds.push(eq(sales.branchId, user.current_branch_id));
+    // admin with no current_branch_id → no filter, sees all.
 
-    // Branch filter — mirror original logic
-    if (user.role !== "admin") {
-      query = query.eq("branch_id", activeBranchId);
-    } else if (user.current_branch_id) {
-      query = query.eq("branch_id", user.current_branch_id);
+    const saleRows = await db
+      .select({
+        id: sales.id,
+        subtotal: sales.subtotal,
+        total_discount: sales.totalDiscount,
+        total_amount: sales.totalAmount,
+        cash_amount: sales.cashAmount,
+        change_amount: sales.changeAmount,
+        sold_at: sales.soldAt,
+        sold_by: sales.soldBy,
+        branch_id: sales.branchId,
+        status: sales.status,
+        branch: { id: branches.id, name: branches.name, code: branches.code },
+        seller: { id: users.id, username: users.username, email: users.email, first_name: users.firstName, last_name: users.lastName },
+      })
+      .from(sales)
+      .leftJoin(branches, eq(sales.branchId, branches.id))
+      .leftJoin(users, eq(sales.soldBy, users.id))
+      .where(conds.length ? and(...conds) : undefined)
+      .orderBy(desc(sales.soldAt));
+
+    // Fetch and group sale_items (with product + discount).
+    const saleIds = saleRows.map((s) => s.id);
+    const itemRows = saleIds.length
+      ? await db
+          .select({
+            sale_id: saleItems.saleId,
+            id: saleItems.id,
+            quantity: saleItems.quantity,
+            price: saleItems.price,
+            discounted_price: saleItems.discountedPrice,
+            discount_amount: saleItems.discountAmount,
+            product: { id: products.id, name: products.name },
+            discount: { id: discounts.id, name: discounts.name, discount_type: discounts.discountType, discount_value: discounts.discountValue },
+          })
+          .from(saleItems)
+          .leftJoin(products, eq(saleItems.productId, products.id))
+          .leftJoin(discounts, eq(saleItems.discountId, discounts.id))
+          .where(inArray(saleItems.saleId, saleIds))
+      : [];
+
+    const itemsBySale = new Map();
+    for (const it of itemRows) {
+      if (!itemsBySale.has(it.sale_id)) itemsBySale.set(it.sale_id, []);
+      itemsBySale.get(it.sale_id).push(it);
     }
-    // admin with no current_branch_id → no filter, sees all
 
-    const { data: sales, error } = await query;
-    if (error) throw error;
+    const response = saleRows.map((sale) => {
+      const branch = sale.branch?.id ? sale.branch : null;
+      const seller = sale.seller?.id ? sale.seller : null;
+      const items = itemsBySale.get(sale.id) || [];
 
-    const response = sales.map((sale) => ({
-      id: sale.id,
-      branch: sale.branch ?? null,
-      subtotal: sale.subtotal ? parseFloat(sale.subtotal) : null,
-      totalDiscount: sale.total_discount ? parseFloat(sale.total_discount) : 0,
-      totalAmount: parseFloat(sale.total_amount),
-      cashAmount: sale.cash_amount ? parseFloat(sale.cash_amount) : null,
-      changeAmount: sale.change_amount ? parseFloat(sale.change_amount) : null,
-      soldAt: sale.sold_at,
-      soldBy: sale.sold_by,
-      status: sale.status,
-      seller: sale.seller
-        ? {
-            id: sale.seller.id,
-            name:
-              sale.seller.first_name && sale.seller.last_name
-                ? `${sale.seller.first_name} ${sale.seller.last_name}`.trim()
-                : sale.seller.username || "Unknown",
-            email: sale.seller.email,
-          }
-        : null,
-      items: sale.items.map((item) => ({
-        id: item.id,
-        product: { id: item.product.id, name: item.product.name },
-        quantity: item.quantity,
-        price: parseFloat(item.price),
-        discountedPrice: item.discounted_price
-          ? parseFloat(item.discounted_price)
-          : null,
-        discountAmount: item.discount_amount
-          ? parseFloat(item.discount_amount)
-          : 0,
-        discount: item.discount
+      return {
+        id: sale.id,
+        branch: branch ?? null,
+        subtotal: sale.subtotal ? parseFloat(sale.subtotal) : null,
+        totalDiscount: sale.total_discount ? parseFloat(sale.total_discount) : 0,
+        totalAmount: parseFloat(sale.total_amount),
+        cashAmount: sale.cash_amount ? parseFloat(sale.cash_amount) : null,
+        changeAmount: sale.change_amount ? parseFloat(sale.change_amount) : null,
+        soldAt: sale.sold_at,
+        soldBy: sale.sold_by,
+        status: sale.status,
+        seller: seller
           ? {
-              id: item.discount.id,
-              name: item.discount.name,
-              type: item.discount.discount_type,
-              value: parseFloat(item.discount.discount_value),
+              id: seller.id,
+              name:
+                seller.first_name && seller.last_name
+                  ? `${seller.first_name} ${seller.last_name}`.trim()
+                  : seller.username || "Unknown",
+              email: seller.email,
             }
           : null,
-      })),
-    }));
+        items: items.map((item) => {
+          const discount = item.discount?.id ? item.discount : null;
+          return {
+            id: item.id,
+            product: { id: item.product.id, name: item.product.name },
+            quantity: item.quantity,
+            price: parseFloat(item.price),
+            discountedPrice: item.discounted_price ? parseFloat(item.discounted_price) : null,
+            discountAmount: item.discount_amount ? parseFloat(item.discount_amount) : 0,
+            discount: discount
+              ? {
+                  id: discount.id,
+                  name: discount.name,
+                  type: discount.discount_type,
+                  value: parseFloat(discount.discount_value),
+                }
+              : null,
+          };
+        }),
+      };
+    });
 
     return res.json(response);
   } catch (error) {
     console.error("Error fetching sales:", error);
-    return res
-      .status(500)
-      .json({ message: "Error fetching sales", error: error.message });
+    return res.status(500).json({ message: "Error fetching sales", error: dbErrorMessage(error) });
   }
 };

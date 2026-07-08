@@ -1,97 +1,18 @@
-const supabase = require("../config/supabase");
+const { and, eq, desc, inArray, sql } = require("drizzle-orm");
+const { db, schema } = require("../config/db");
 const { createLog } = require("../middleware/logMiddleware");
+const { dbErrorMessage } = require("../utils/dbError");
 const { emitDashboardRefresh, emitStockUpdate } = require("../utils/socket");
+
+const { users, products, branchStocks, sales, saleItems, refunds, refundItems } = schema;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // POST /api/sales/:saleId/refunds
 //
-// The refund flow touches multiple tables atomically:
-//   refunds → refund_items → branch_stocks → stocks → sales (status update)
-//
-// Supabase JS has no client-side transaction API, so the write portion is
-// handled by a Postgres function called via supabase.rpc().
-//
-// ── Create this function once in Supabase SQL Editor ─────────────────────────
-//
-// create or replace function process_refund(
-//   p_sale_id       bigint,
-//   p_branch_id     bigint,
-//   p_refunded_by   bigint,
-//   p_total_refund  numeric,
-//   p_reason        text,
-//   p_items         jsonb,
-//   -- [{ sale_item_id, product_id, quantity, refund_amount }]
-//   p_new_sale_status text
-// )
-// returns bigint as $$
-// declare
-//   v_refund_id      bigint;
-//   v_item           jsonb;
-//   v_current_stock  integer;
-//   v_new_stock      integer;
-// begin
-//   -- 1. Create refund header
-//   insert into refunds (sale_id, branch_id, refunded_by, total_refund, reason)
-//   values (p_sale_id, p_branch_id, p_refunded_by, p_total_refund, p_reason)
-//   returning id into v_refund_id;
-//
-//   -- 2. Process each item
-//   for v_item in select * from jsonb_array_elements(p_items) loop
-//     -- Create refund item
-//     insert into refund_items (refund_id, sale_item_id, product_id, quantity, refund_amount)
-//     values (
-//       v_refund_id,
-//       (v_item->>'sale_item_id')::bigint,
-//       (v_item->>'product_id')::bigint,
-//       (v_item->>'quantity')::integer,
-//       (v_item->>'refund_amount')::numeric
-//     );
-//
-//     -- Lock and fetch current branch stock
-//     select current_stock into v_current_stock
-//     from branch_stocks
-//     where product_id = (v_item->>'product_id')::bigint
-//       and branch_id  = p_branch_id
-//     for update;
-//
-//     if v_current_stock is null then
-//       raise exception 'BranchStock not found for product % at branch %',
-//         (v_item->>'product_id'), p_branch_id;
-//     end if;
-//
-//     v_new_stock := v_current_stock + (v_item->>'quantity')::integer;
-//
-//     -- Restore stock
-//     update branch_stocks
-//     set current_stock = v_new_stock
-//     where product_id = (v_item->>'product_id')::bigint
-//       and branch_id  = p_branch_id;
-//
-//     -- Log stock movement
-//     insert into stocks (
-//       product_id, branch_id, transaction_type,
-//       quantity, quantity_before, quantity_after,
-//       reference_id, reference_type, performed_by
-//     )
-//     values (
-//       (v_item->>'product_id')::bigint,
-//       p_branch_id,
-//       'REFUND',
-//       (v_item->>'quantity')::integer,
-//       v_current_stock,
-//       v_new_stock,
-//       v_refund_id,
-//       'refund',
-//       p_refunded_by
-//     );
-//   end loop;
-//
-//   -- 3. Update sale status (cast text → sale_status enum)
-//   update sales set status = p_new_sale_status::sale_status where id = p_sale_id;
-//
-//   return v_refund_id;
-// end;
-// $$ language plpgsql;
+// The refund write path is atomic via the process_refund Postgres function
+// (db/functions/process_refund.sql): refunds → refund_items → branch_stocks
+// (restore) → stocks (ledger) → sales.status. Keep that SQL in sync with any
+// refund/stock logic changes.
 // ─────────────────────────────────────────────────────────────────────────────
 
 exports.createRefund = async (req, res) => {
@@ -112,37 +33,24 @@ exports.createRefund = async (req, res) => {
     }
 
     // ── 2. Resolve user and active branch ────────────────────────────────────
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select("id, role, branch_id, current_branch_id")
-      .eq("id", req.user.id)
-      .maybeSingle();
-
-    if (userError) throw userError;
+    const [user] = await db
+      .select({ id: users.id, role: users.role, branch_id: users.branchId, current_branch_id: users.currentBranchId })
+      .from(users)
+      .where(eq(users.id, req.user.id))
+      .limit(1);
 
     const activeBranchId = user.current_branch_id || user.branch_id;
     if (!activeBranchId) {
-      return res
-        .status(400)
-        .json({ message: "User is not assigned to any branch" });
+      return res.status(400).json({ message: "User is not assigned to any branch" });
     }
 
     // ── 3. Fetch the original sale with its items ────────────────────────────
-    const { data: sale, error: saleError } = await supabase
-      .from("sales")
-      .select(
-        `
-        id, branch_id, status,
-        items:sale_items (
-          id, product_id, quantity, price, discounted_price,
-          product:products (id, name)
-        )
-      `,
-      )
-      .eq("id", saleId)
-      .maybeSingle();
+    const [sale] = await db
+      .select({ id: sales.id, branch_id: sales.branchId, status: sales.status })
+      .from(sales)
+      .where(eq(sales.id, saleId))
+      .limit(1);
 
-    if (saleError) throw saleError;
     if (!sale) return res.status(404).json({ message: "Sale not found" });
 
     if (user.role !== "admin" && sale.branch_id !== activeBranchId) {
@@ -151,14 +59,25 @@ exports.createRefund = async (req, res) => {
       });
     }
 
-    // ── 4. Fetch already-refunded quantities for this sale ───────────────────
-    const { data: existingRefundItems, error: refundItemsError } =
-      await supabase
-        .from("refund_items")
-        .select("sale_item_id, quantity, refund:refunds!inner (sale_id)")
-        .eq("refund.sale_id", saleId);
+    sale.items = await db
+      .select({
+        id: saleItems.id,
+        product_id: saleItems.productId,
+        quantity: saleItems.quantity,
+        price: saleItems.price,
+        discounted_price: saleItems.discountedPrice,
+        product: { id: products.id, name: products.name },
+      })
+      .from(saleItems)
+      .leftJoin(products, eq(saleItems.productId, products.id))
+      .where(eq(saleItems.saleId, saleId));
 
-    if (refundItemsError) throw refundItemsError;
+    // ── 4. Fetch already-refunded quantities for this sale ───────────────────
+    const existingRefundItems = await db
+      .select({ sale_item_id: refundItems.saleItemId, quantity: refundItems.quantity })
+      .from(refundItems)
+      .innerJoin(refunds, eq(refundItems.refundId, refunds.id))
+      .where(eq(refunds.saleId, saleId));
 
     const alreadyRefunded = existingRefundItems.reduce((acc, ri) => {
       acc[ri.sale_item_id] = (acc[ri.sale_item_id] || 0) + ri.quantity;
@@ -209,9 +128,7 @@ exports.createRefund = async (req, res) => {
       items.reduce((s, i) => s + i.quantity, 0);
 
     const newSaleStatus =
-      totalRefundedQty >= totalSaleQty
-        ? "fully_refunded"
-        : "partially_refunded";
+      totalRefundedQty >= totalSaleQty ? "fully_refunded" : "partially_refunded";
 
     // ── 7. Execute atomic refund via RPC ─────────────────────────────────────
     const rpcItems = stockUpdates.map((su) => ({
@@ -221,32 +138,27 @@ exports.createRefund = async (req, res) => {
       refund_amount: su.refundAmount,
     }));
 
-    const { data: refundId, error: rpcError } = await supabase.rpc(
-      "process_refund",
-      {
-        p_branch_id: sale.branch_id,
-        p_items: rpcItems,
-        p_new_sale_status: newSaleStatus,
-        p_reason: reason || null,
-        p_refunded_by: req.user.id,
-        p_sale_id: parseInt(saleId),
-        p_total_refund: calculatedTotalRefund,
-      },
-    );
-
-    if (rpcError) throw rpcError;
+    const result = await db.execute(sql`
+      select process_refund(
+        ${parseInt(saleId)}::bigint,
+        ${sale.branch_id}::bigint,
+        ${req.user.id}::bigint,
+        ${calculatedTotalRefund}::numeric,
+        ${reason || null}::text,
+        ${JSON.stringify(rpcItems)}::jsonb,
+        ${newSaleStatus}::text
+      ) as refund_id
+    `);
+    const refundId = Number(result.rows[0].refund_id);
 
     // ── 8. Fetch updated stock levels for socket emissions ───────────────────
     const productIds = stockUpdates.map((su) => su.productId);
-    const { data: updatedStocks } = await supabase
-      .from("branch_stocks")
-      .select("product_id, current_stock")
-      .eq("branch_id", sale.branch_id)
-      .in("product_id", productIds);
+    const updatedStocks = await db
+      .select({ product_id: branchStocks.productId, current_stock: branchStocks.currentStock })
+      .from(branchStocks)
+      .where(and(eq(branchStocks.branchId, sale.branch_id), inArray(branchStocks.productId, productIds)));
 
-    const stockMap = Object.fromEntries(
-      (updatedStocks || []).map((s) => [s.product_id, s.current_stock]),
-    );
+    const stockMap = Object.fromEntries(updatedStocks.map((s) => [s.product_id, s.current_stock]));
 
     // ── 9. Audit log ─────────────────────────────────────────────────────────
     await createLog(
@@ -261,7 +173,7 @@ exports.createRefund = async (req, res) => {
         totalRefund: calculatedTotalRefund,
         reason: reason || null,
         branch: sale.branch_id,
-      },
+      }
     );
 
     // ── 10. Socket emissions ──────────────────────────────────────────────────
@@ -289,9 +201,7 @@ exports.createRefund = async (req, res) => {
     });
   } catch (error) {
     console.error("Refund error:", error);
-    return res
-      .status(500)
-      .json({ message: "Server error", error: error.message });
+    return res.status(500).json({ message: "Server error", error: dbErrorMessage(error) });
   }
 };
 
@@ -302,52 +212,72 @@ exports.getRefundsBySale = async (req, res) => {
   try {
     const { saleId } = req.params;
 
-    const { data: refunds, error } = await supabase
-      .from("refunds")
-      .select(
-        `
-        id, sale_id, total_refund, reason, created_at,
-        refunder:users (id, username, first_name, last_name),
-        items:refund_items (
-          id, sale_item_id, quantity, refund_amount,
-          product:products (id, name)
-        )
-      `,
-      )
-      .eq("sale_id", saleId)
-      .order("created_at", { ascending: false });
+    const refundRows = await db
+      .select({
+        id: refunds.id,
+        sale_id: refunds.saleId,
+        total_refund: refunds.totalRefund,
+        reason: refunds.reason,
+        created_at: refunds.createdAt,
+        refunder: { id: users.id, username: users.username, first_name: users.firstName, last_name: users.lastName },
+      })
+      .from(refunds)
+      .leftJoin(users, eq(refunds.refundedBy, users.id))
+      .where(eq(refunds.saleId, saleId))
+      .orderBy(desc(refunds.createdAt));
 
-    if (error) throw error;
+    const refundIds = refundRows.map((r) => r.id);
+    const itemRows = refundIds.length
+      ? await db
+          .select({
+            refund_id: refundItems.refundId,
+            id: refundItems.id,
+            sale_item_id: refundItems.saleItemId,
+            quantity: refundItems.quantity,
+            refund_amount: refundItems.refundAmount,
+            product: { id: products.id, name: products.name },
+          })
+          .from(refundItems)
+          .leftJoin(products, eq(refundItems.productId, products.id))
+          .where(inArray(refundItems.refundId, refundIds))
+      : [];
 
-    const response = refunds.map((refund) => ({
-      id: refund.id,
-      saleId: refund.sale_id,
-      totalRefund: parseFloat(refund.total_refund),
-      reason: refund.reason,
-      createdAt: refund.created_at,
-      refundedBy: refund.refunder
-        ? {
-            id: refund.refunder.id,
-            name:
-              refund.refunder.first_name && refund.refunder.last_name
-                ? `${refund.refunder.first_name} ${refund.refunder.last_name}`.trim()
-                : refund.refunder.username || "Unknown",
-          }
-        : null,
-      items: refund.items.map((item) => ({
-        id: item.id,
-        saleItemId: item.sale_item_id,
-        product: { id: item.product.id, name: item.product.name },
-        quantity: item.quantity,
-        refundAmount: parseFloat(item.refund_amount),
-      })),
-    }));
+    const itemsByRefund = new Map();
+    for (const it of itemRows) {
+      if (!itemsByRefund.has(it.refund_id)) itemsByRefund.set(it.refund_id, []);
+      itemsByRefund.get(it.refund_id).push(it);
+    }
+
+    const response = refundRows.map((refund) => {
+      const refunder = refund.refunder?.id ? refund.refunder : null;
+      return {
+        id: refund.id,
+        saleId: refund.sale_id,
+        totalRefund: parseFloat(refund.total_refund),
+        reason: refund.reason,
+        createdAt: refund.created_at,
+        refundedBy: refunder
+          ? {
+              id: refunder.id,
+              name:
+                refunder.first_name && refunder.last_name
+                  ? `${refunder.first_name} ${refunder.last_name}`.trim()
+                  : refunder.username || "Unknown",
+            }
+          : null,
+        items: (itemsByRefund.get(refund.id) || []).map((item) => ({
+          id: item.id,
+          saleItemId: item.sale_item_id,
+          product: { id: item.product.id, name: item.product.name },
+          quantity: item.quantity,
+          refundAmount: parseFloat(item.refund_amount),
+        })),
+      };
+    });
 
     return res.json(response);
   } catch (error) {
     console.error("Error fetching refunds:", error);
-    return res
-      .status(500)
-      .json({ message: "Error fetching refunds", error: error.message });
+    return res.status(500).json({ message: "Error fetching refunds", error: dbErrorMessage(error) });
   }
 };
