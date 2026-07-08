@@ -1,5 +1,15 @@
-const supabase = require("../config/supabase");
+const { and, or, eq, ilike, gte, asc, desc, count } = require("drizzle-orm");
+const { db, schema } = require("../config/db");
+const { branchFull } = require("../db/projections");
 const { createLog } = require("../middleware/logMiddleware");
+
+const { branches, users, sales, stocks } = schema;
+
+// Small helper: COUNT(*) over a table with an optional where.
+const countWhere = async (table, where) => {
+  const [{ n }] = await db.select({ n: count() }).from(table).where(where);
+  return n;
+};
 
 // ─── Get All Branches ─────────────────────────────────────────────────────────
 
@@ -7,27 +17,24 @@ exports.getAllBranches = async (req, res) => {
   try {
     const { isActive, search } = req.query;
 
-    let query = supabase
-      .from("branches")
-      .select("*")
-      .order("is_main_branch", { ascending: false })
-      .order("name", { ascending: true });
-
-    if (isActive !== undefined) {
-      query = query.eq("is_active", isActive === "true");
-    }
-
-    if (search) {
-      query = query.or(
-        `name.ilike.%${search}%,code.ilike.%${search}%,city.ilike.%${search}%`
+    const conds = [];
+    if (isActive !== undefined) conds.push(eq(branches.isActive, isActive === "true"));
+    if (search)
+      conds.push(
+        or(
+          ilike(branches.name, `%${search}%`),
+          ilike(branches.code, `%${search}%`),
+          ilike(branches.city, `%${search}%`)
+        )
       );
-    }
 
-    const { data: branches, error } = await query;
+    const rows = await db
+      .select(branchFull)
+      .from(branches)
+      .where(conds.length ? and(...conds) : undefined)
+      .orderBy(desc(branches.isMainBranch), asc(branches.name));
 
-    if (error) throw error;
-
-    return res.status(200).json(branches);
+    return res.status(200).json(rows);
   } catch (error) {
     console.error("Error fetching branches:", error);
     return res.status(500).json({ message: "Server error", error: error.message });
@@ -38,19 +45,20 @@ exports.getAllBranches = async (req, res) => {
 
 exports.getBranchById = async (req, res) => {
   try {
-    const { data: branch, error } = await supabase
-      .from("branches")
-      .select(`
-        *,
-        users (id, username, email, role)
-      `)
-      .eq("id", req.params.id)
-      .maybeSingle();
+    const [branch] = await db
+      .select(branchFull)
+      .from(branches)
+      .where(eq(branches.id, req.params.id))
+      .limit(1);
 
-    if (error) throw error;
     if (!branch) return res.status(404).json({ message: "Branch not found" });
 
-    return res.status(200).json(branch);
+    const branchUsers = await db
+      .select({ id: users.id, username: users.username, email: users.email, role: users.role })
+      .from(users)
+      .where(eq(users.branchId, req.params.id));
+
+    return res.status(200).json({ ...branch, users: branchUsers });
   } catch (error) {
     console.error("Error fetching branch:", error);
     return res.status(500).json({ message: "Server error", error: error.message });
@@ -71,48 +79,38 @@ exports.createBranch = async (req, res) => {
       return res.status(400).json({ message: "Name and code are required" });
     }
 
-    // Check duplicate code
-    const { data: existing } = await supabase
-      .from("branches")
-      .select("id")
-      .eq("code", code)
-      .maybeSingle();
+    const [existing] = await db
+      .select({ id: branches.id })
+      .from(branches)
+      .where(eq(branches.code, code))
+      .limit(1);
 
     if (existing) {
       return res.status(400).json({ message: "Branch code already exists" });
     }
 
-    // If setting as main branch, unset existing main branch first.
-    // The partial unique index on the DB prevents two main branches,
-    // so we must clear it before inserting the new one.
+    // Partial unique index allows only one main branch — clear it first.
     if (isMainBranch) {
-      const { error: unsetError } = await supabase
-        .from("branches")
-        .update({ is_main_branch: false })
-        .eq("is_main_branch", true);
-      if (unsetError) throw unsetError;
+      await db.update(branches).set({ isMainBranch: false }).where(eq(branches.isMainBranch, true));
     }
 
-    const { data: branch, error } = await supabase
-      .from("branches")
-      .insert({
+    const [branch] = await db
+      .insert(branches)
+      .values({
         name,
         code,
         address,
         city,
         province,
-        postal_code: postalCode,
+        postalCode: postalCode,
         phone,
         email,
-        manager_name: managerName,
-        is_active: isActive !== undefined ? isActive : true,
-        is_main_branch: isMainBranch || false,
-        operating_hours: operatingHours || null,
+        managerName: managerName,
+        isActive: isActive !== undefined ? isActive : true,
+        isMainBranch: isMainBranch || false,
+        operatingHours: operatingHours || null,
       })
-      .select()
-      .single();
-
-    if (error) throw error;
+      .returning(branchFull);
 
     await createLog(
       req, "CREATE", "branches", branch.id,
@@ -138,60 +136,51 @@ exports.updateBranch = async (req, res) => {
       isActive, isMainBranch, operatingHours,
     } = req.body;
 
-    const { data: branch, error: fetchError } = await supabase
-      .from("branches")
-      .select("*")
-      .eq("id", branchId)
-      .maybeSingle();
+    const [branch] = await db
+      .select(branchFull)
+      .from(branches)
+      .where(eq(branches.id, branchId))
+      .limit(1);
 
-    if (fetchError) throw fetchError;
     if (!branch) return res.status(404).json({ message: "Branch not found" });
 
-    // Check code uniqueness if changing
     if (code && code !== branch.code) {
-      const { data: taken } = await supabase
-        .from("branches")
-        .select("id")
-        .eq("code", code)
-        .maybeSingle();
+      const [taken] = await db
+        .select({ id: branches.id })
+        .from(branches)
+        .where(eq(branches.code, code))
+        .limit(1);
       if (taken) {
         return res.status(400).json({ message: "Branch code already exists" });
       }
     }
 
-    // Unset existing main branch if promoting this one
+    // Unset existing main branch if promoting this one.
     if (isMainBranch && !branch.is_main_branch) {
-      const { error: unsetError } = await supabase
-        .from("branches")
-        .update({ is_main_branch: false })
-        .eq("is_main_branch", true);
-      if (unsetError) throw unsetError;
+      await db.update(branches).set({ isMainBranch: false }).where(eq(branches.isMainBranch, true));
     }
 
-    // Build update payload with fallback to existing values
+    // Fallback to existing values; keys are camelCase for Drizzle .set().
     const updates = {
-      name:            name            ?? branch.name,
-      code:            code            ?? branch.code,
-      address:         address         !== undefined ? address         : branch.address,
-      city:            city            !== undefined ? city            : branch.city,
-      province:        province        !== undefined ? province        : branch.province,
-      postal_code:     postalCode      !== undefined ? postalCode      : branch.postal_code,
-      phone:           phone           !== undefined ? phone           : branch.phone,
-      email:           email           !== undefined ? email           : branch.email,
-      manager_name:    managerName     !== undefined ? managerName     : branch.manager_name,
-      is_active:       isActive        !== undefined ? isActive        : branch.is_active,
-      is_main_branch:  isMainBranch    !== undefined ? isMainBranch    : branch.is_main_branch,
-      operating_hours: operatingHours  !== undefined ? operatingHours  : branch.operating_hours,
+      name:           name           ?? branch.name,
+      code:           code           ?? branch.code,
+      address:        address        !== undefined ? address        : branch.address,
+      city:           city           !== undefined ? city           : branch.city,
+      province:       province       !== undefined ? province       : branch.province,
+      postalCode:     postalCode     !== undefined ? postalCode     : branch.postal_code,
+      phone:          phone          !== undefined ? phone          : branch.phone,
+      email:          email          !== undefined ? email          : branch.email,
+      managerName:    managerName    !== undefined ? managerName    : branch.manager_name,
+      isActive:       isActive       !== undefined ? isActive       : branch.is_active,
+      isMainBranch:   isMainBranch   !== undefined ? isMainBranch   : branch.is_main_branch,
+      operatingHours: operatingHours !== undefined ? operatingHours : branch.operating_hours,
     };
 
-    const { data: updatedBranch, error: updateError } = await supabase
-      .from("branches")
-      .update(updates)
-      .eq("id", branchId)
-      .select()
-      .single();
-
-    if (updateError) throw updateError;
+    const [updatedBranch] = await db
+      .update(branches)
+      .set(updates)
+      .where(eq(branches.id, branchId))
+      .returning(branchFull);
 
     await createLog(
       req, "UPDATE", "branches", branchId,
@@ -210,24 +199,18 @@ exports.updateBranch = async (req, res) => {
 
 exports.deleteBranch = async (req, res) => {
   try {
-    const { data: branch, error: fetchError } = await supabase
-      .from("branches")
-      .select("id, name")
-      .eq("id", req.params.id)
-      .maybeSingle();
+    const [branch] = await db
+      .select({ id: branches.id, name: branches.name })
+      .from(branches)
+      .where(eq(branches.id, req.params.id))
+      .limit(1);
 
-    if (fetchError) throw fetchError;
     if (!branch) return res.status(404).json({ message: "Branch not found" });
 
-    // Check for associated records before deleting
-    const [
-      { count: userCount },
-      { count: saleCount },
-      { count: stockCount },
-    ] = await Promise.all([
-      supabase.from("users").select("id", { count: "exact", head: true }).eq("branch_id", branch.id),
-      supabase.from("sales").select("id", { count: "exact", head: true }).eq("branch_id", branch.id),
-      supabase.from("stocks").select("id", { count: "exact", head: true }).eq("branch_id", branch.id),
+    const [userCount, saleCount, stockCount] = await Promise.all([
+      countWhere(users, eq(users.branchId, branch.id)),
+      countWhere(sales, eq(sales.branchId, branch.id)),
+      countWhere(stocks, eq(stocks.branchId, branch.id)),
     ]);
 
     if (userCount > 0 || saleCount > 0 || stockCount > 0) {
@@ -236,12 +219,7 @@ exports.deleteBranch = async (req, res) => {
       });
     }
 
-    const { error: deleteError } = await supabase
-      .from("branches")
-      .delete()
-      .eq("id", branch.id);
-
-    if (deleteError) throw deleteError;
+    await db.delete(branches).where(eq(branches.id, branch.id));
 
     await createLog(
       req, "DELETE", "branches", branch.id,
@@ -260,23 +238,17 @@ exports.deleteBranch = async (req, res) => {
 
 exports.toggleBranchStatus = async (req, res) => {
   try {
-    const { data: branch, error: fetchError } = await supabase
-      .from("branches")
-      .select("id, name, is_active")
-      .eq("id", req.params.id)
-      .maybeSingle();
+    const [branch] = await db
+      .select({ id: branches.id, name: branches.name, is_active: branches.isActive })
+      .from(branches)
+      .where(eq(branches.id, req.params.id))
+      .limit(1);
 
-    if (fetchError) throw fetchError;
     if (!branch) return res.status(404).json({ message: "Branch not found" });
 
     const newStatus = !branch.is_active;
 
-    const { error: updateError } = await supabase
-      .from("branches")
-      .update({ is_active: newStatus })
-      .eq("id", branch.id);
-
-    if (updateError) throw updateError;
+    await db.update(branches).set({ isActive: newStatus }).where(eq(branches.id, branch.id));
 
     await createLog(
       req, "UPDATE", "branches", branch.id,
@@ -305,31 +277,11 @@ exports.getBranchStats = async (req, res) => {
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1).toISOString();
     const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString();
 
-    const [
-      { count: userCount },
-      { count: todaySales },
-      { count: monthlySales },
-      { count: stockTransactions },
-    ] = await Promise.all([
-      supabase
-        .from("users")
-        .select("id", { count: "exact", head: true })
-        .eq("branch_id", branchId),
-      supabase
-        .from("sales")
-        .select("id", { count: "exact", head: true })
-        .eq("branch_id", branchId)
-        .gte("sold_at", startOfDay),
-      supabase
-        .from("sales")
-        .select("id", { count: "exact", head: true })
-        .eq("branch_id", branchId)
-        .gte("sold_at", startOfMonth),
-      supabase
-        .from("stocks")
-        .select("id", { count: "exact", head: true })
-        .eq("branch_id", branchId)
-        .gte("created_at", sevenDaysAgo),
+    const [userCount, todaySales, monthlySales, stockTransactions] = await Promise.all([
+      countWhere(users, eq(users.branchId, branchId)),
+      countWhere(sales, and(eq(sales.branchId, branchId), gte(sales.soldAt, startOfDay))),
+      countWhere(sales, and(eq(sales.branchId, branchId), gte(sales.soldAt, startOfMonth))),
+      countWhere(stocks, and(eq(stocks.branchId, branchId), gte(stocks.createdAt, sevenDaysAgo))),
     ]);
 
     return res.status(200).json({

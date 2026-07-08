@@ -1,18 +1,19 @@
-const supabase = require("../config/supabase");
+const { db, schema } = require("../config/db");
+const { eq, asc, count } = require("drizzle-orm");
 const { createLog } = require("../middleware/logMiddleware");
+
+const { categories, products } = schema;
 
 // ─── Get All Categories ───────────────────────────────────────────────────────
 
 exports.getAllCategories = async (req, res) => {
   try {
-    const { data: categories, error } = await supabase
-      .from("categories")
-      .select("*")
-      .order("name", { ascending: true });
+    const rows = await db
+      .select()
+      .from(categories)
+      .orderBy(asc(categories.name));
 
-    if (error) throw error;
-
-    return res.status(200).json(categories);
+    return res.status(200).json(rows);
   } catch (error) {
     return res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -22,16 +23,27 @@ exports.getAllCategories = async (req, res) => {
 
 exports.getCategoryById = async (req, res) => {
   try {
-    const { data: category, error } = await supabase
-      .from("categories")
-      .select(`id, name, description, products (id, name, sku, price, status)`)
-      .eq("id", req.params.id)
-      .maybeSingle();
+    const [category] = await db
+      .select({ id: categories.id, name: categories.name, description: categories.description })
+      .from(categories)
+      .where(eq(categories.id, req.params.id))
+      .limit(1);
 
-    if (error) throw error;
     if (!category) return res.status(404).json({ message: "Category not found" });
 
-    return res.status(200).json(category);
+    // Nested products — matches the previous supabase nested-select shape.
+    const categoryProducts = await db
+      .select({
+        id: products.id,
+        name: products.name,
+        sku: products.sku,
+        price: products.price,
+        status: products.status,
+      })
+      .from(products)
+      .where(eq(products.categoryId, req.params.id));
+
+    return res.status(200).json({ ...category, products: categoryProducts });
   } catch (error) {
     return res.status(500).json({ message: "Server error", error: error.message });
   }
@@ -47,23 +59,20 @@ exports.createCategory = async (req, res) => {
       return res.status(400).json({ message: "Category name is required" });
     }
 
-    const { data: existing } = await supabase
-      .from("categories")
-      .select("id")
-      .eq("name", name)
-      .maybeSingle();
+    const [existing] = await db
+      .select({ id: categories.id })
+      .from(categories)
+      .where(eq(categories.name, name))
+      .limit(1);
 
     if (existing) {
       return res.status(400).json({ message: "Category with this name already exists" });
     }
 
-    const { data: newCategory, error } = await supabase
-      .from("categories")
-      .insert({ name, description })
-      .select()
-      .single();
-
-    if (error) throw error;
+    const [newCategory] = await db
+      .insert(categories)
+      .values({ name, description })
+      .returning();
 
     await createLog(
       req, "CREATE", "categories", newCategory.id,
@@ -84,21 +93,20 @@ exports.updateCategory = async (req, res) => {
     const { name, description } = req.body;
     const categoryId = req.params.id;
 
-    const { data: category, error: fetchError } = await supabase
-      .from("categories")
-      .select("*")
-      .eq("id", categoryId)
-      .maybeSingle();
+    const [category] = await db
+      .select()
+      .from(categories)
+      .where(eq(categories.id, categoryId))
+      .limit(1);
 
-    if (fetchError) throw fetchError;
     if (!category) return res.status(404).json({ message: "Category not found" });
 
     if (name && name !== category.name) {
-      const { data: existing } = await supabase
-        .from("categories")
-        .select("id")
-        .eq("name", name)
-        .maybeSingle();
+      const [existing] = await db
+        .select({ id: categories.id })
+        .from(categories)
+        .where(eq(categories.name, name))
+        .limit(1);
 
       if (existing) {
         return res.status(400).json({ message: "Category with this name already exists" });
@@ -110,14 +118,11 @@ exports.updateCategory = async (req, res) => {
       description: description !== undefined ? description : category.description,
     };
 
-    const { data: updatedCategory, error: updateError } = await supabase
-      .from("categories")
-      .update(updates)
-      .eq("id", categoryId)
-      .select()
-      .single();
-
-    if (updateError) throw updateError;
+    const [updatedCategory] = await db
+      .update(categories)
+      .set(updates)
+      .where(eq(categories.id, categoryId))
+      .returning();
 
     await createLog(
       req, "UPDATE", "categories", categoryId,
@@ -137,21 +142,18 @@ exports.deleteCategory = async (req, res) => {
   try {
     const categoryId = req.params.id;
 
-    const { data: category, error: fetchError } = await supabase
-      .from("categories")
-      .select("id, name")
-      .eq("id", categoryId)
-      .maybeSingle();
+    const [category] = await db
+      .select({ id: categories.id, name: categories.name })
+      .from(categories)
+      .where(eq(categories.id, categoryId))
+      .limit(1);
 
-    if (fetchError) throw fetchError;
     if (!category) return res.status(404).json({ message: "Category not found" });
 
-    const { count: productCount, error: countError } = await supabase
-      .from("products")
-      .select("id", { count: "exact", head: true })
-      .eq("category_id", categoryId);
-
-    if (countError) throw countError;
+    const [{ productCount }] = await db
+      .select({ productCount: count() })
+      .from(products)
+      .where(eq(products.categoryId, categoryId));
 
     if (productCount > 0) {
       return res.status(400).json({
@@ -159,12 +161,7 @@ exports.deleteCategory = async (req, res) => {
       });
     }
 
-    const { error: deleteError } = await supabase
-      .from("categories")
-      .delete()
-      .eq("id", categoryId);
-
-    if (deleteError) throw deleteError;
+    await db.delete(categories).where(eq(categories.id, categoryId));
 
     await createLog(
       req, "DELETE", "categories", categoryId,

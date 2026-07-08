@@ -1,28 +1,21 @@
 const bcrypt = require("bcryptjs");
-const supabase = require("../config/supabase");
+const { eq, desc } = require("drizzle-orm");
+const { db, schema } = require("../config/db");
+const { userProfile } = require("../db/projections");
 const { createLog } = require("../middleware/logMiddleware");
 
-// ─── Helpers ──────────────────────────────────────────────────────────────────
-
-const PUBLIC_FIELDS = `
-  id, username, email, role,
-  first_name, last_name, contact_number,
-  branch_id, current_branch_id,
-  is_active, created_at, updated_at
-`;
+const { users } = schema;
 
 // ─── Get All Users ────────────────────────────────────────────────────────────
 
 exports.getAllUsers = async (req, res) => {
   try {
-    const { data: users, error } = await supabase
-      .from("users")
-      .select(PUBLIC_FIELDS)
-      .order("created_at", { ascending: false });
+    const rows = await db
+      .select(userProfile)
+      .from(users)
+      .orderBy(desc(users.createdAt));
 
-    if (error) throw error;
-
-    return res.status(200).json(users);
+    return res.status(200).json(rows);
   } catch (error) {
     return res
       .status(500)
@@ -46,7 +39,6 @@ exports.createUser = async (req, res) => {
       pin,
     } = req.body;
 
-    // Validate required fields first
     if (!username || !email || !role || isActive === undefined) {
       return res.status(400).json({
         message:
@@ -54,23 +46,21 @@ exports.createUser = async (req, res) => {
       });
     }
 
-    // Check duplicate email
-    const { data: existingEmail } = await supabase
-      .from("users")
-      .select("id")
-      .eq("email", email)
-      .maybeSingle();
+    const [existingEmail] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.email, email))
+      .limit(1);
 
     if (existingEmail) {
       return res.status(400).json({ message: "Email already in use" });
     }
 
-    // Check duplicate username
-    const { data: existingUsername } = await supabase
-      .from("users")
-      .select("id")
-      .eq("username", username)
-      .maybeSingle();
+    const [existingUsername] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.username, username))
+      .limit(1);
 
     if (existingUsername) {
       return res.status(400).json({ message: "Username already in use" });
@@ -83,24 +73,21 @@ exports.createUser = async (req, res) => {
       hashedPin = await bcrypt.hash(String(pin), 10);
     }
 
-    const { data: newUser, error } = await supabase
-      .from("users")
-      .insert({
+    const [newUser] = await db
+      .insert(users)
+      .values({
         username,
         email,
         password: hashedPassword,
         role,
-        first_name: firstName,
-        last_name: lastName,
-        contact_number: contactNumber,
-        is_active: isActive,
-        branch_id: branchId || null,
+        firstName: firstName,
+        lastName: lastName,
+        contactNumber: contactNumber,
+        isActive: isActive,
+        branchId: branchId || null,
         pin: hashedPin,
       })
-      .select(PUBLIC_FIELDS)
-      .single();
-
-    if (error) throw error;
+      .returning(userProfile);
 
     await createLog(
       req,
@@ -128,13 +115,12 @@ exports.deleteUser = async (req, res) => {
   try {
     const userId = req.params.id;
 
-    const { data: user, error: fetchError } = await supabase
-      .from("users")
-      .select("id, username")
-      .eq("id", userId)
-      .maybeSingle();
+    const [user] = await db
+      .select({ id: users.id, username: users.username })
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
 
-    if (fetchError) throw fetchError;
     if (!user) return res.status(404).json({ message: "User not found" });
 
     if (req.user.id === user.id) {
@@ -143,12 +129,7 @@ exports.deleteUser = async (req, res) => {
         .json({ message: "You cannot delete your own account" });
     }
 
-    const { error: deleteError } = await supabase
-      .from("users")
-      .delete()
-      .eq("id", userId);
-
-    if (deleteError) throw deleteError;
+    await db.delete(users).where(eq(users.id, userId));
 
     await createLog(
       req,
@@ -184,58 +165,51 @@ exports.updateUser = async (req, res) => {
     } = req.body;
     const userId = req.params.id;
 
-    // Fetch existing user for comparison
-    const { data: user, error: fetchError } = await supabase
-      .from("users")
-      .select(PUBLIC_FIELDS)
-      .eq("id", userId)
-      .maybeSingle();
+    const [user] = await db
+      .select(userProfile)
+      .from(users)
+      .where(eq(users.id, userId))
+      .limit(1);
 
-    if (fetchError) throw fetchError;
     if (!user) return res.status(404).json({ message: "User not found" });
 
-    // Check email uniqueness
     if (email && email !== user.email) {
-      const { data: taken } = await supabase
-        .from("users")
-        .select("id")
-        .eq("email", email)
-        .maybeSingle();
+      const [taken] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.email, email))
+        .limit(1);
       if (taken) return res.status(400).json({ message: "Email already in use" });
     }
 
-    // Check username uniqueness
     if (username && username !== user.username) {
-      const { data: taken } = await supabase
-        .from("users")
-        .select("id")
-        .eq("username", username)
-        .maybeSingle();
+      const [taken] = await db
+        .select({ id: users.id })
+        .from(users)
+        .where(eq(users.username, username))
+        .limit(1);
       if (taken) return res.status(400).json({ message: "Username already taken" });
     }
 
-    // Build update payload — only include fields that were sent
+    // Only include fields that were sent (keys camelCase for Drizzle .set()).
     const updates = {};
     if (username !== undefined) updates.username = username;
     if (email !== undefined) updates.email = email;
     if (role !== undefined) updates.role = role;
-    if (firstName !== undefined) updates.first_name = firstName;
-    if (lastName !== undefined) updates.last_name = lastName;
-    if (contactNumber !== undefined) updates.contact_number = contactNumber;
-    if (isActive !== undefined) updates.is_active = isActive;
-    if (branchId !== undefined) updates.branch_id = branchId || null;
+    if (firstName !== undefined) updates.firstName = firstName;
+    if (lastName !== undefined) updates.lastName = lastName;
+    if (contactNumber !== undefined) updates.contactNumber = contactNumber;
+    if (isActive !== undefined) updates.isActive = isActive;
+    if (branchId !== undefined) updates.branchId = branchId || null;
     if (pin !== undefined) {
       updates.pin = pin ? await bcrypt.hash(String(pin), 10) : null;
     }
 
-    const { data: updatedUser, error: updateError } = await supabase
-      .from("users")
-      .update(updates)
-      .eq("id", userId)
-      .select(PUBLIC_FIELDS)
-      .single();
-
-    if (updateError) throw updateError;
+    const [updatedUser] = await db
+      .update(users)
+      .set(updates)
+      .where(eq(users.id, userId))
+      .returning(userProfile);
 
     await createLog(
       req,
