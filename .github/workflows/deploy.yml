@@ -1,0 +1,37 @@
+name: Deploy to production
+
+# Deploys on every push to the production branch. The runner SSHes into the
+# DigitalOcean droplet, syncs the code, and rebuilds the API container.
+# (Secrets required in repo Settings -> Secrets and variables -> Actions:
+#  DROPLET_HOST, DROPLET_USER, DROPLET_SSH_KEY.)
+on:
+  push:
+    branches: [feat/drizzle-rds-migration]
+  workflow_dispatch: {}
+
+# Never let two deploys run at once; queue them instead.
+concurrency:
+  group: production-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy over SSH
+        uses: appleboy/ssh-action@v1.2.0
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd /opt/CM-Pharmacy-API
+            # Deterministic sync: match the branch exactly (ignores local drift;
+            # .env is gitignored so it is never touched).
+            git fetch --all --prune
+            git reset --hard origin/feat/drizzle-rds-migration
+            # Rebuild + restart only what changed; DB and Caddy keep running.
+            docker compose -f docker-compose.prod.yml up -d --build
+            # Reclaim space from the previous image build.
+            docker image prune -f
