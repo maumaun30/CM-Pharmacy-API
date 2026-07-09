@@ -21,9 +21,14 @@ Verify: `aws sts get-caller-identity`, `terraform version`, `psql --version`.
 cd CM-Pharmacy-API/infra/terraform
 cp terraform.tfvars.example terraform.tfvars   # edit if needed
 terraform init
-terraform plan      # review — should show ~15-20 resources to add
+terraform plan      # review — should show ~15 resources to add
 terraform apply     # type 'yes'
 ```
+
+> **AWS "free plan" accounts** cap RDS automated-backup retention and reject the
+> default 7-day window with `FreeTierRestrictionError`. Set
+> `db_backup_retention_period = 0` in `terraform.tfvars` (backups off). Bump it
+> back to 7 once on a paid plan for point-in-time recovery.
 
 Note the outputs (also `terraform output` anytime):
 - `rds_endpoint` — host:port
@@ -48,12 +53,21 @@ DATABASE_URL=postgres://cmadmin:<password>@<rds_address>:5432/cm_pharmacy
 
 ## 3. Load the schema into RDS
 
-Same SQL as local — migrations + RPC functions, via psql:
+Same SQL as local — migrations + RPC functions, via psql.
 
+**Linux/macOS (bash):**
 ```bash
 cd CM-Pharmacy-API
 DATABASE_URL="postgres://cmadmin:<password>@<rds_address>:5432/cm_pharmacy" \
   bash db/load-schema.sh
+```
+
+**Windows (PowerShell):** use the bundled loader — it reads the endpoint + secret
+ARN from `terraform output`, pulls the password from Secrets Manager, and applies
+everything via `psql` (no bash, password never on the command line):
+```powershell
+cd CM-Pharmacy-API/infra
+.\load-rds-schema.ps1
 ```
 
 > To reach RDS from your laptop for this step, temporarily set
