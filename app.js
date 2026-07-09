@@ -5,6 +5,7 @@ const compression = require("compression");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const dotenv = require("dotenv");
+const { corsOrigin } = require("./config/cors");
 const categoryRoutes = require("./routes/categoryRoutes");
 const productRoutes = require("./routes/productRoutes");
 const discountRoutes = require("./routes/discountRoutes");
@@ -28,7 +29,7 @@ initializeSocket(server);
 app.use(helmet());
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || "http://localhost:3000",
+    origin: corsOrigin,
     credentials: true,
   })
 );

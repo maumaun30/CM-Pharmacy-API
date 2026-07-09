@@ -1,4 +1,5 @@
 const socketIO = require("socket.io");
+const { corsOrigin } = require("../config/cors");
 
 let io;
 
@@ -8,7 +9,7 @@ let io;
 const initializeSocket = (server) => {
   io = socketIO(server, {
     cors: {
-      origin: process.env.CLIENT_URL || "http://localhost:3000",
+      origin: corsOrigin,
       methods: ["GET", "POST"],
       credentials: true,
     },
