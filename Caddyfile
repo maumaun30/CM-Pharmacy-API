@@ -1,0 +1,12 @@
+# Caddy reverse proxy with automatic HTTPS (Let's Encrypt).
+# Caddy obtains + auto-renews a free TLS certificate for this hostname as long as
+# the domain's DNS points at this server and ports 80/443 are reachable.
+{
+	email admin@devmau.site
+}
+
+cm-api.devmau.site {
+	# Proxy all traffic (including Socket.IO WebSocket upgrades) to the API
+	# container on the internal Docker network. Caddy handles WS transparently.
+	reverse_proxy api:5000
+}
