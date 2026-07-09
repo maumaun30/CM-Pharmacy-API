@@ -17,14 +17,19 @@ module "rds" {
   vpc_id      = module.network.vpc_id
   vpc_cidr    = module.network.vpc_cidr
 
-  # RDS lives in PRIVATE subnets normally. For temporary laptop validation
-  # (db_publicly_accessible=true) it must sit in PUBLIC subnets so a public IP
-  # is routable via the internet gateway. Flip the flag back off once ECS runs.
-  subnet_ids = var.db_publicly_accessible ? module.network.public_subnet_ids : module.network.private_subnet_ids
+  # The DB subnet group spans BOTH tiers so toggling public access never has to
+  # REMOVE a subnet the running instance sits in (RDS rejects that as "in use").
+  # Exposure is controlled by publicly_accessible + the security group, not by
+  # which subnets the group contains: with publicly_accessible=false the instance
+  # gets no public IP and the SG allows only the VPC CIDR, so it's unreachable
+  # from the internet. When true (temporary laptop access) the public subnets in
+  # the group give the public IP a route to the internet gateway.
+  subnet_ids = concat(module.network.public_subnet_ids, module.network.private_subnet_ids)
 
-  instance_class      = var.db_instance_class
-  multi_az            = var.db_multi_az
-  publicly_accessible = var.db_publicly_accessible
+  instance_class          = var.db_instance_class
+  multi_az                = var.db_multi_az
+  publicly_accessible     = var.db_publicly_accessible
+  backup_retention_period = var.db_backup_retention_period
 
   # Only add your IP to the DB ingress when you've opted into public access.
   allowed_ingress_cidrs = var.db_publicly_accessible && var.my_ip_cidr != "" ? [var.my_ip_cidr] : []

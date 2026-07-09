@@ -48,6 +48,16 @@ variable "db_multi_az" {
   default     = false
 }
 
+variable "db_backup_retention_period" {
+  description = <<-EOT
+    Days of automated RDS backups. 0 disables them (required on the AWS free
+    plan, which caps retention). Set to 7 once on a paid plan for point-in-time
+    recovery.
+  EOT
+  type        = number
+  default     = 7
+}
+
 variable "db_publicly_accessible" {
   description = <<-EOT
     Whether RDS gets a public endpoint. Keep FALSE in production. Set true ONLY
