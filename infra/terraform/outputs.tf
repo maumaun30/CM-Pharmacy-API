@@ -1,3 +1,8 @@
+output "route53_name_servers" {
+  description = "Set these 4 nameservers at your registrar (Hostinger) for the domain."
+  value       = module.dns.name_servers
+}
+
 output "vpc_id" {
   value = module.network.vpc_id
 }

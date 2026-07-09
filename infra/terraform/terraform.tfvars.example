@@ -4,6 +4,12 @@ aws_region  = "ap-southeast-1"
 name_prefix = "cm-pharmacy"
 environment = "prod"
 
+# ── Domain / DNS (Route 53) ──────────────────────────────────────────────────
+# Terraform creates the hosted zone; point your registrar's nameservers at the
+# `route53_name_servers` output. api_hostname is where the API is served.
+domain_name  = "example.com"
+api_hostname = "api.example.com"
+
 # ── Foundation stage (network + RDS only) ────────────────────────────────────
 # Keep NAT off until ECS is added (saves ~USD 32/mo).
 enable_nat_gateway = false

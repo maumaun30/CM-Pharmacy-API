@@ -16,6 +16,16 @@ variable "environment" {
   default     = "prod"
 }
 
+variable "domain_name" {
+  description = "Apex domain managed in Route 53 (e.g. devmau.site)."
+  type        = string
+}
+
+variable "api_hostname" {
+  description = "Fully-qualified hostname the API is served at (e.g. api.devmau.site)."
+  type        = string
+}
+
 variable "vpc_cidr" {
   description = "CIDR block for the VPC."
   type        = string
