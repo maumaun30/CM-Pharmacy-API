@@ -3,7 +3,7 @@ const router = express.Router();
 const authController = require("../controllers/authController");
 const {
   authenticateUser,
-  authorizeRoles,
+  requirePermission,
 } = require("../middleware/authMiddleware");
 
 // Public routes
@@ -17,11 +17,19 @@ router.put("/profile", authenticateUser, authController.updateProfile);
 router.post(
   "/switch-branch",
   authenticateUser,
-  authorizeRoles("admin"),
+  requirePermission("branches.switch"),
   authController.switchBranch,
 );
 
 router.get("/me", authenticateUser, authController.getCurrentUser);
+
+// Read-only role→permission matrix (Settings page).
+router.get(
+  "/roles",
+  authenticateUser,
+  requirePermission("users.read"),
+  authController.getRoles,
+);
 
 router.post("/login-pin", authController.loginWithPin);
 router.put("/pin", authenticateUser, authController.setPin);

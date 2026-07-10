@@ -4,7 +4,7 @@ const router = express.Router();
 const branchController = require("../controllers/branchController");
 const {
   authenticateUser,
-  authorizeRoles,
+  requirePermission,
 } = require("../middleware/authMiddleware");
 
 router.use(authenticateUser);
@@ -13,20 +13,20 @@ router.use(authenticateUser);
 router.get("/", branchController.getAllBranches);
 router.get("/:id", branchController.getBranchById);
 
-// Admin-only routes
+// Management routes
 router.get(
   "/:id/stats",
-  authorizeRoles("admin"),
+  requirePermission("branches.read"),
   branchController.getBranchStats,
 );
 
-router.post("/", authorizeRoles("admin"), branchController.createBranch);
-router.put("/:id", authorizeRoles("admin"), branchController.updateBranch);
-router.delete("/:id", authorizeRoles("admin"), branchController.deleteBranch);
+router.post("/", requirePermission("branches.write"), branchController.createBranch);
+router.put("/:id", requirePermission("branches.write"), branchController.updateBranch);
+router.delete("/:id", requirePermission("branches.write"), branchController.deleteBranch);
 
 router.patch(
   "/:id/toggle",
-  authorizeRoles("admin"),
+  requirePermission("branches.write"),
   branchController.toggleBranchStatus,
 );
 

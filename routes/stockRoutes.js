@@ -4,33 +4,33 @@ const router = express.Router();
 const stockController = require("../controllers/stockController");
 const {
   authenticateUser,
-  authorizeRoles,
+  requirePermission,
 } = require("../middleware/authMiddleware");
 
 router.use(authenticateUser);
 
 router.get(
   "/transactions",
-  authorizeRoles("admin"),
+  requirePermission("stock.read"),
   stockController.getAllStockTransactions,
 );
 router.get(
   "/summary",
-  authorizeRoles("admin"),
+  requirePermission("stock.read"),
   stockController.getStockSummary,
 );
 router.get(
   "/low-stock",
-  authorizeRoles("admin"),
+  requirePermission("stock.read"),
   stockController.getLowStockProducts,
 );
 router.get(
   "/product/:productId",
-  authorizeRoles("admin"),
+  requirePermission("stock.read"),
   stockController.getProductStockHistory,
 );
-router.post("/add", authorizeRoles("admin"), stockController.addStock);
-router.post("/adjust", authorizeRoles("admin"), stockController.adjustStock);
-router.post("/loss", authorizeRoles("admin"), stockController.recordStockLoss);
+router.post("/add", requirePermission("stock.write"), stockController.addStock);
+router.post("/adjust", requirePermission("stock.write"), stockController.adjustStock);
+router.post("/loss", requirePermission("stock.write"), stockController.recordStockLoss);
 
 module.exports = router;

@@ -3,23 +3,23 @@ const router = express.Router();
 const discountController = require("../controllers/discountController");
 const {
   authenticateUser,
-  authorizeRoles,
+  requirePermission,
 } = require("../middleware/authMiddleware");
 
 router.use(authenticateUser);
 
 router.get("/", discountController.getAllDiscounts);
-router.get("/:id", authorizeRoles("admin"), discountController.getDiscountById);
-router.post("/", authorizeRoles("admin"), discountController.createDiscount);
-router.put("/:id", authorizeRoles("admin"), discountController.updateDiscount);
+router.get("/:id", requirePermission("discounts.read"), discountController.getDiscountById);
+router.post("/", requirePermission("discounts.write"), discountController.createDiscount);
+router.put("/:id", requirePermission("discounts.write"), discountController.updateDiscount);
 router.delete(
   "/:id",
-  authorizeRoles("admin"),
+  requirePermission("discounts.write"),
   discountController.deleteDiscount,
 );
 router.patch(
   "/:id/toggle",
-  authorizeRoles("admin"),
+  requirePermission("discounts.write"),
   discountController.toggleDiscountStatus,
 );
 router.get(

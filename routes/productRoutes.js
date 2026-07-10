@@ -3,7 +3,7 @@ const router = express.Router();
 const productController = require("../controllers/productController");
 const {
   authenticateUser,
-  authorizeRoles,
+  requirePermission,
 } = require("../middleware/authMiddleware");
 
 // All routes require authentication
@@ -20,28 +20,28 @@ router.get("/:id", productController.getProductById);
 // Create new product
 router.post(
   "/",
-  authorizeRoles("admin", "manager"),
+  requirePermission("products.write"),
   productController.createProduct,
 );
 
 // Update product
 router.put(
   "/:id",
-  authorizeRoles("admin", "manager"),
+  requirePermission("products.write"),
   productController.updateProduct,
 );
 
 // Delete product
 router.delete(
   "/:id",
-  authorizeRoles("admin"),
+  requirePermission("products.delete"),
   productController.deleteProduct,
 );
 
 // Toggle product status
 router.patch(
   "/:id/toggle-status",
-  authorizeRoles("admin", "manager"),
+  requirePermission("products.write"),
   productController.toggleProductStatus,
 );
 
@@ -54,7 +54,7 @@ router.get(
 // Update stock levels for specific branch (thresholds only)
 router.patch(
   "/:productId/branch/:branchId/stock",
-  authorizeRoles("admin", "manager"),
+  requirePermission("stock.write"),
   productController.updateBranchStock,
 );
 

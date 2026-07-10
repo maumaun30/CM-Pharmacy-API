@@ -4,18 +4,18 @@ const router = express.Router();
 const logController = require("../controllers/logController");
 const {
   authenticateUser,
-  authorizeRoles,
+  requirePermission,
 } = require("../middleware/authMiddleware");
 
 router.use(authenticateUser);
 
-router.get("/", authorizeRoles("admin"), logController.getAllLogs);
+router.get("/", requirePermission("logs.read"), logController.getAllLogs);
 
-router.get("/stats", authorizeRoles("admin"), logController.getLogStats);
+router.get("/stats", requirePermission("logs.read"), logController.getLogStats);
 
 router.get(
   "/:module/:recordId",
-  authorizeRoles("admin"),
+  requirePermission("logs.read"),
   logController.getRecordLogs,
 );
 

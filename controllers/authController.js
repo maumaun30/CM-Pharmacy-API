@@ -5,6 +5,11 @@ const { alias } = require("drizzle-orm/pg-core");
 const { db, schema } = require("../config/db");
 const { branchFull, userProfile } = require("../db/projections");
 const { createLog } = require("../middleware/logMiddleware");
+const {
+  ROLES,
+  ALL_PERMISSIONS,
+  permissionsForRole,
+} = require("../config/permissions");
 
 const { users, branches } = schema;
 
@@ -22,6 +27,7 @@ const safeUser = (user) => ({
   username: user.username,
   email: user.email,
   role: user.role,
+  permissions: permissionsForRole(user.role),
 });
 
 // ─── Register ────────────────────────────────────────────────────────────────
@@ -338,9 +344,32 @@ exports.getCurrentUser = async (req, res) => {
     user.branch = user.branch?.id ? user.branch : null;
     user.currentBranch = user.currentBranch?.id ? user.currentBranch : null;
 
+    // Expanded capability list drives what the UI renders for this user.
+    user.permissions = permissionsForRole(user.role);
+
     return res.status(200).json(user);
   } catch (error) {
     console.error("Error fetching current user:", error);
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
+  }
+};
+
+// ─── Roles & Permissions matrix ───────────────────────────────────────────────
+// Read-only view of the code-defined role→permission matrix. Powers the
+// Settings › Roles & Permissions page. Source of truth is config/permissions.js.
+
+exports.getRoles = async (req, res) => {
+  try {
+    return res.status(200).json({
+      permissions: ALL_PERMISSIONS,
+      roles: ROLES.map((role) => ({
+        role,
+        permissions: permissionsForRole(role),
+      })),
+    });
+  } catch (error) {
     return res
       .status(500)
       .json({ message: "Server error", error: error.message });

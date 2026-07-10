@@ -1,5 +1,10 @@
 const socketIO = require("socket.io");
+const jwt = require("jsonwebtoken");
+const { eq } = require("drizzle-orm");
 const { corsOrigin } = require("../config/cors");
+const { db, schema } = require("../config/db");
+
+const { users } = schema;
 
 let io;
 
@@ -16,25 +21,71 @@ const initializeSocket = (server) => {
     pingTimeout: 60000,
   });
 
-  io.on("connection", (socket) => {
-    console.log(`✅ Client connected: ${socket.id}`);
+  // ─── Handshake authentication ────────────────────────────────────────────────
+  // Every socket connection must present a valid JWT (same token as the REST API).
+  // We verify it and load the user so room membership is derived from a trusted
+  // identity — never from a client-supplied branch id. Rejected connections never
+  // reach the connection handler, so anonymous clients can't subscribe to events.
+  io.use(async (socket, next) => {
+    try {
+      const raw =
+        socket.handshake.auth?.token ||
+        socket.handshake.headers?.authorization?.replace(/^Bearer\s+/i, "");
+      if (!raw) return next(new Error("Unauthorized: no token"));
 
-    // Join room based on branch (for branch-specific updates)
-    socket.on("join-branch", (branchId) => {
-      if (branchId) {
-        socket.join(`branch-${branchId}`);
-        console.log(`🏢 Socket ${socket.id} joined branch-${branchId}`);
+      const decoded = jwt.verify(raw, process.env.JWT_SECRET);
+
+      const [user] = await db
+        .select({
+          id: users.id,
+          role: users.role,
+          isActive: users.isActive,
+          branchId: users.branchId,
+          currentBranchId: users.currentBranchId,
+        })
+        .from(users)
+        .where(eq(users.id, decoded.id))
+        .limit(1);
+
+      if (!user || !user.isActive) {
+        return next(new Error("Unauthorized: invalid user"));
       }
-      // Admin room for all-branches view
+
+      socket.user = user;
+      return next();
+    } catch (err) {
+      return next(new Error("Unauthorized: invalid token"));
+    }
+  });
+
+  io.on("connection", (socket) => {
+    const { id, role, branchId, currentBranchId } = socket.user;
+    console.log(`✅ Client connected: ${socket.id} (user ${id}, ${role})`);
+
+    // Room membership is authoritative and identity-derived:
+    //  • admins receive the all-branches feed;
+    //  • everyone is scoped to their active branch.
+    if (role === "admin") {
       socket.join("admin-all");
+    }
+    const effectiveBranch = currentBranchId ?? branchId;
+    if (effectiveBranch) {
+      socket.join(`branch-${effectiveBranch}`);
+    }
+
+    // Branch switching stays available but is now guarded: a non-admin can only
+    // (re)join their own branch; admins may follow any branch.
+    socket.on("join-branch", (requestedBranchId) => {
+      if (!requestedBranchId) return; // null = "all branches" (admins already in admin-all)
+      const allowed =
+        role === "admin" || Number(requestedBranchId) === (currentBranchId ?? branchId);
+      if (allowed) {
+        socket.join(`branch-${requestedBranchId}`);
+      }
     });
 
-    // Leave branch room
-    socket.on("leave-branch", (branchId) => {
-      if (branchId) {
-        socket.leave(`branch-${branchId}`);
-        console.log(`👋 Socket ${socket.id} left branch-${branchId}`);
-      }
+    socket.on("leave-branch", (requestedBranchId) => {
+      if (requestedBranchId) socket.leave(`branch-${requestedBranchId}`);
     });
 
     socket.on("disconnect", () => {

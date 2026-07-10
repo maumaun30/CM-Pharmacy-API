@@ -2,6 +2,7 @@ const jwt = require("jsonwebtoken");
 const { alias } = require("drizzle-orm/pg-core");
 const { eq } = require("drizzle-orm");
 const { db, schema } = require("../config/db");
+const { hasPermission, permissionsForRole } = require("../config/permissions");
 
 const { users, branches } = schema;
 
@@ -51,6 +52,9 @@ exports.authenticateUser = async (req, res, next) => {
       id:              user.id,
       username:        user.username,
       role:            user.role,
+      // Expanded capability list for this role — handy for controllers that
+      // need finer checks than a single route guard.
+      permissions:     permissionsForRole(user.role),
       branchId:        user.branchId,
       currentBranchId: user.currentBranchId,
       // Collapse the joined object to null when there is no related branch,
@@ -79,6 +83,28 @@ exports.authorizeRoles = (...roles) => {
     if (!roles.includes(req.user.role)) {
       return res.status(403).json({
         message: `Role (${req.user.role}) is not authorized to access this resource`,
+      });
+    }
+
+    next();
+  };
+};
+
+// ─── Permission-based authorization ───────────────────────────────────────────
+// Preferred over authorizeRoles: gate on a capability, not a hardcoded role, so
+// the role→permission matrix in config/permissions.js stays the single source of
+// truth. Pass one or more permission keys — access is granted if the user's role
+// holds ANY of them.
+exports.requirePermission = (...permissions) => {
+  return (req, res, next) => {
+    if (!req.user) {
+      return res.status(401).json({ message: "Authentication required" });
+    }
+
+    const allowed = permissions.some((p) => hasPermission(req.user.role, p));
+    if (!allowed) {
+      return res.status(403).json({
+        message: `Role (${req.user.role}) lacks permission for this resource`,
       });
     }
 
