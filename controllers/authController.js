@@ -5,6 +5,7 @@ const { alias } = require("drizzle-orm/pg-core");
 const { db, schema } = require("../config/db");
 const { branchFull, userProfile } = require("../db/projections");
 const { createLog } = require("../middleware/logMiddleware");
+const { verifyGoogleIdToken } = require("../config/google");
 const {
   ROLES,
   ALL_PERMISSIONS,
@@ -321,6 +322,8 @@ exports.getCurrentUser = async (req, res) => {
         branch_id: users.branchId,
         current_branch_id: users.currentBranchId,
         is_active: users.isActive,
+        google_sub: users.googleSub,
+        google_email: users.googleEmail,
         created_at: users.createdAt,
         updated_at: users.updatedAt,
         branch: {
@@ -346,6 +349,10 @@ exports.getCurrentUser = async (req, res) => {
 
     // Expanded capability list drives what the UI renders for this user.
     user.permissions = permissionsForRole(user.role);
+
+    // Surface Google link state without leaking the raw subject id to the client.
+    user.google_linked = !!user.google_sub;
+    delete user.google_sub;
 
     return res.status(200).json(user);
   } catch (error) {
@@ -434,6 +441,169 @@ exports.loginWithPin = async (req, res) => {
       user: safeUser(user),
       token,
     });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
+  }
+};
+
+// ─── Google Login ─────────────────────────────────────────────────────────────
+// Public. Matches ONLY by the stored google_sub — never by email — so a Google
+// account can authenticate a staff user only if that user explicitly linked it
+// while already logged in. Never creates accounts (staff are admin-provisioned).
+
+exports.googleLogin = async (req, res) => {
+  try {
+    const { idToken } = req.body;
+    if (!idToken) {
+      return res.status(400).json({ message: "Google idToken is required" });
+    }
+
+    let payload;
+    try {
+      payload = await verifyGoogleIdToken(idToken);
+    } catch (err) {
+      return res.status(401).json({ message: "Invalid Google token" });
+    }
+
+    const [user] = await db
+      .select({
+        id: users.id,
+        username: users.username,
+        email: users.email,
+        role: users.role,
+        isActive: users.isActive,
+      })
+      .from(users)
+      .where(eq(users.googleSub, payload.sub))
+      .limit(1);
+
+    if (!user) {
+      return res.status(401).json({
+        message:
+          "No linked Google account. Sign in normally, then connect Google in Settings.",
+      });
+    }
+
+    if (!user.isActive) {
+      return res
+        .status(401)
+        .json({ message: "Account is inactive. Contact administrator." });
+    }
+
+    const token = signToken(user);
+
+    await createLog(
+      req,
+      "LOGIN",
+      "auth",
+      user.id,
+      `User ${user.username} logged in via Google`,
+      { role: user.role }
+    );
+
+    return res.status(200).json({
+      message: "Login successful",
+      user: safeUser(user),
+      token,
+    });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
+  }
+};
+
+// ─── Link Google ──────────────────────────────────────────────────────────────
+// Authenticated. Attaches the caller's Google account (by verified sub) to their
+// existing staff record. Rejects if that Google account is already linked to a
+// different user.
+
+exports.linkGoogle = async (req, res) => {
+  try {
+    const { idToken } = req.body;
+    const userId = req.user.id;
+
+    if (!idToken) {
+      return res.status(400).json({ message: "Google idToken is required" });
+    }
+
+    let payload;
+    try {
+      payload = await verifyGoogleIdToken(idToken);
+    } catch (err) {
+      return res.status(401).json({ message: "Invalid Google token" });
+    }
+
+    // Guard: this Google account must not already belong to someone else.
+    const [owner] = await db
+      .select({ id: users.id })
+      .from(users)
+      .where(eq(users.googleSub, payload.sub))
+      .limit(1);
+
+    if (owner && owner.id !== userId) {
+      return res
+        .status(409)
+        .json({ message: "This Google account is linked to another user" });
+    }
+
+    const [updated] = await db
+      .update(users)
+      .set({
+        googleSub: payload.sub,
+        googleEmail: payload.email || null,
+        googleLinkedAt: new Date().toISOString(),
+      })
+      .where(eq(users.id, userId))
+      .returning({ id: users.id, username: users.username, email: users.email, role: users.role });
+
+    await createLog(
+      req,
+      "UPDATE",
+      "auth",
+      userId,
+      `User ${updated.username} linked Google account`,
+      { googleEmail: payload.email }
+    );
+
+    return res.status(200).json({
+      message: "Google account linked",
+      user: { ...safeUser(updated), googleLinked: true, googleEmail: payload.email || null },
+    });
+  } catch (error) {
+    return res
+      .status(500)
+      .json({ message: "Server error", error: error.message });
+  }
+};
+
+// ─── Unlink Google ────────────────────────────────────────────────────────────
+// Authenticated. Safe to remove because password is NOT NULL — the user always
+// retains password/PIN login as a fallback.
+
+exports.unlinkGoogle = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    const [updated] = await db
+      .update(users)
+      .set({ googleSub: null, googleEmail: null, googleLinkedAt: null })
+      .where(eq(users.id, userId))
+      .returning({ id: users.id, username: users.username });
+
+    if (!updated) return res.status(404).json({ message: "User not found" });
+
+    await createLog(
+      req,
+      "UPDATE",
+      "auth",
+      userId,
+      `User ${updated.username} unlinked Google account`
+    );
+
+    return res.status(200).json({ message: "Google account unlinked" });
   } catch (error) {
     return res
       .status(500)

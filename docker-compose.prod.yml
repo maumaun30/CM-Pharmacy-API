@@ -36,6 +36,9 @@ services:
       JWT_SECRET: ${JWT_SECRET}
       JWT_EXPIRES_IN: ${JWT_EXPIRES_IN}
       CLIENT_URL: ${CLIENT_URL}
+      # Comma-separated Google OAuth client-id allow-list (Web + iOS). Sourced
+      # from the droplet .env; without it, Google sign-in verification fails.
+      GOOGLE_CLIENT_IDS: ${GOOGLE_CLIENT_IDS}
       PORT: "5000"
     depends_on:
       db:

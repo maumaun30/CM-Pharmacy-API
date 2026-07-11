@@ -117,6 +117,12 @@ const users = pgTable("users", {
 	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
 	currentBranchId: bigint("current_branch_id", { mode: "number" }),
 	isActive: boolean("is_active").default(true).notNull(),
+	// Google account linking. googleSub is the stable Google subject id and the
+	// only key used to authenticate a Google login; googleEmail is audit/display
+	// only and never trusted as an identity claim.
+	googleSub: text("google_sub"),
+	googleEmail: text("google_email"),
+	googleLinkedAt: timestamp("google_linked_at", { withTimezone: true, mode: 'string' }),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow(),
 	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow(),
 }, (table) => [
@@ -132,6 +138,7 @@ const users = pgTable("users", {
 		}),
 	unique("users_username_key").on(table.username),
 	unique("users_email_key").on(table.email),
+	unique("users_google_sub_key").on(table.googleSub),
 ]);
 
 const categoryDiscounts = pgTable("category_discounts", {

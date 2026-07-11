@@ -34,4 +34,9 @@ router.get(
 router.post("/login-pin", authController.loginWithPin);
 router.put("/pin", authenticateUser, authController.setPin);
 
+// Google account linking (web + mobile share these endpoints).
+router.post("/google", authController.googleLogin);                       // public
+router.post("/google/link", authenticateUser, authController.linkGoogle); // authed
+router.delete("/google/link", authenticateUser, authController.unlinkGoogle);
+
 module.exports = router;
