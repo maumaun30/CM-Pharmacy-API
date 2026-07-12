@@ -3,6 +3,7 @@ const { db, schema } = require("../config/db");
 const { stockFull } = require("../db/projections");
 const { createLog } = require("../middleware/logMiddleware");
 const { emitStockUpdate, emitLowStockAlert, emitDashboardRefresh } = require("../utils/socket");
+const { invalidate } = require("../utils/cache");
 
 const { stocks, products, users, branches, branchStocks } = schema;
 
@@ -215,6 +216,7 @@ exports.addStock = async (req, res) => {
       { stock }
     );
 
+    invalidate("dashboard:");
     emitStockUpdate(activeBranchId, { productId, newStock: quantityAfter });
     maybeEmitLowStock(activeBranchId, branchStock, stock.product, quantityAfter);
     emitDashboardRefresh(activeBranchId);
@@ -270,6 +272,7 @@ exports.adjustStock = async (req, res) => {
       { stock, reason }
     );
 
+    invalidate("dashboard:");
     emitStockUpdate(activeBranchId, { productId, newStock: quantityAfter });
     maybeEmitLowStock(activeBranchId, branchStock, stock.product, quantityAfter);
     emitDashboardRefresh(activeBranchId);
@@ -329,6 +332,7 @@ exports.recordStockLoss = async (req, res) => {
       { stock, reason }
     );
 
+    invalidate("dashboard:");
     emitStockUpdate(activeBranchId, { productId, newStock: quantityAfter });
     maybeEmitLowStock(activeBranchId, branchStock, stock.product, quantityAfter);
     emitDashboardRefresh(activeBranchId);

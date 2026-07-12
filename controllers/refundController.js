@@ -4,6 +4,7 @@ const { db, schema } = require("../config/db");
 const { createLog } = require("../middleware/logMiddleware");
 const { dbErrorMessage } = require("../utils/dbError");
 const { emitDashboardRefresh, emitStockUpdate } = require("../utils/socket");
+const { invalidate } = require("../utils/cache");
 
 const { users, products, branchStocks, sales, saleItems, refunds, refundItems } = schema;
 
@@ -199,6 +200,9 @@ exports.createRefund = async (req, res) => {
       .where(and(eq(branchStocks.branchId, sale.branch_id), inArray(branchStocks.productId, productIds)));
 
     const stockMap = Object.fromEntries(updatedStocks.map((s) => [s.product_id, s.current_stock]));
+
+    // Bust the dashboard cache so the refetch reflects the refund immediately.
+    invalidate("dashboard:");
 
     // ── 9. Audit log ─────────────────────────────────────────────────────────
     await createLog(

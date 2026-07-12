@@ -2,6 +2,7 @@ const { and, eq, inArray, desc, sql } = require("drizzle-orm");
 const { db, schema } = require("../config/db");
 const { createLog } = require("../middleware/logMiddleware");
 const { dbErrorMessage } = require("../utils/dbError");
+const { invalidate } = require("../utils/cache");
 const {
   emitNewSale,
   emitDashboardRefresh,
@@ -204,6 +205,10 @@ exports.createSale = async (req, res) => {
       .where(and(eq(branchStocks.branchId, activeBranchId), inArray(branchStocks.productId, productIds)));
 
     const stockMap = Object.fromEntries(updatedStocks.map((s) => [s.product_id, s]));
+
+    // Bust the dashboard cache so the socket-triggered refetch returns this sale
+    // (stats are cached ~60s; without this the client re-reads stale data).
+    invalidate("dashboard:");
 
     // ── 10. Socket emissions ───────────────────────────────────────────────────
     if (completeSale) {
