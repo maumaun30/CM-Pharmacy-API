@@ -40,8 +40,15 @@ exports.createUser = async (req, res) => {
       contactNumber,
       isActive,
       branchId,
+      allowedBranchIds,
       pin,
     } = req.body;
+
+    // Only managers use multi-branch access; normalize to a clean number array.
+    const normalizedAllowed =
+      role === "manager" && Array.isArray(allowedBranchIds)
+        ? [...new Set(allowedBranchIds.map(Number).filter((n) => Number.isFinite(n)))]
+        : [];
 
     if (!username || !email || !role || isActive === undefined) {
       return res.status(400).json({
@@ -89,6 +96,7 @@ exports.createUser = async (req, res) => {
         contactNumber: contactNumber,
         isActive: isActive,
         branchId: branchId || null,
+        allowedBranchIds: normalizedAllowed,
         pin: hashedPin,
       })
       .returning(userProfile);
@@ -200,6 +208,7 @@ exports.updateUser = async (req, res) => {
       contactNumber,
       isActive,
       branchId,
+      allowedBranchIds,
       pin,
     } = req.body;
     const userId = req.params.id;
@@ -240,6 +249,17 @@ exports.updateUser = async (req, res) => {
     if (contactNumber !== undefined) updates.contactNumber = contactNumber;
     if (isActive !== undefined) updates.isActive = isActive;
     if (branchId !== undefined) updates.branchId = branchId || null;
+    // Multi-branch access applies to managers only. Set when provided, and clear
+    // when a user is moved off the manager role.
+    if (allowedBranchIds !== undefined) {
+      const effRole = role ?? user.role;
+      updates.allowedBranchIds =
+        effRole === "manager" && Array.isArray(allowedBranchIds)
+          ? [...new Set(allowedBranchIds.map(Number).filter((n) => Number.isFinite(n)))]
+          : [];
+    } else if (role !== undefined && role !== "manager") {
+      updates.allowedBranchIds = [];
+    }
     if (pin !== undefined) {
       updates.pin = pin ? await bcrypt.hash(String(pin), 10) : null;
     }

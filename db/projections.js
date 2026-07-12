@@ -40,6 +40,7 @@ const userProfile = {
   contact_number: u.contactNumber,
   branch_id: u.branchId,
   current_branch_id: u.currentBranchId,
+  allowed_branch_ids: u.allowedBranchIds,
   is_active: u.isActive,
   created_at: u.createdAt,
   updated_at: u.updatedAt,

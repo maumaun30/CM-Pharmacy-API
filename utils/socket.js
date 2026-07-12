@@ -42,6 +42,7 @@ const initializeSocket = (server) => {
           isActive: users.isActive,
           branchId: users.branchId,
           currentBranchId: users.currentBranchId,
+          allowedBranchIds: users.allowedBranchIds,
         })
         .from(users)
         .where(eq(users.id, decoded.id))
@@ -59,7 +60,7 @@ const initializeSocket = (server) => {
   });
 
   io.on("connection", (socket) => {
-    const { id, role, branchId, currentBranchId } = socket.user;
+    const { id, role, branchId, currentBranchId, allowedBranchIds } = socket.user;
     console.log(`✅ Client connected: ${socket.id} (user ${id}, ${role})`);
 
     // Room membership is authoritative and identity-derived:
@@ -77,8 +78,12 @@ const initializeSocket = (server) => {
     // (re)join their own branch; admins may follow any branch.
     socket.on("join-branch", (requestedBranchId) => {
       if (!requestedBranchId) return; // null = "all branches" (admins already in admin-all)
+      const req = Number(requestedBranchId);
+      const managerBranches = (allowedBranchIds ?? []).map(Number);
       const allowed =
-        role === "admin" || Number(requestedBranchId) === (currentBranchId ?? branchId);
+        role === "admin" ||
+        req === (currentBranchId ?? branchId) ||
+        (role === "manager" && managerBranches.includes(req));
       if (allowed) {
         socket.join(`branch-${requestedBranchId}`);
       }

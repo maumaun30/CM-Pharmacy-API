@@ -31,6 +31,7 @@ exports.authenticateUser = async (req, res, next) => {
         isActive: users.isActive,
         branchId: users.branchId,
         currentBranchId: users.currentBranchId,
+        allowedBranchIds: users.allowedBranchIds,
         branch: { id: homeBranch.id, name: homeBranch.name, code: homeBranch.code },
         currentBranch: { id: curBranch.id, name: curBranch.name, code: curBranch.code },
       })
@@ -57,6 +58,7 @@ exports.authenticateUser = async (req, res, next) => {
       permissions:     permissionsForRole(user.role),
       branchId:        user.branchId,
       currentBranchId: user.currentBranchId,
+      allowedBranchIds: user.allowedBranchIds ?? [],
       // Collapse the joined object to null when there is no related branch,
       // matching the previous supabase nested-select semantics.
       branch:          user.branch?.id ? user.branch : null,

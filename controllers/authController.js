@@ -1,6 +1,6 @@
 const jwt = require("jsonwebtoken");
 const bcrypt = require("bcryptjs");
-const { and, or, eq } = require("drizzle-orm");
+const { and, or, eq, inArray } = require("drizzle-orm");
 const { alias } = require("drizzle-orm/pg-core");
 const { db, schema } = require("../config/db");
 const { branchFull, userProfile } = require("../db/projections");
@@ -276,10 +276,19 @@ exports.switchBranch = async (req, res) => {
     const { branchId } = req.body;
     const userId = req.user.id;
 
+    // Admins switch anywhere; managers only among their allowed branches (plus
+    // their home). Cashiers cannot switch.
     if (req.user.role !== "admin") {
-      return res
-        .status(403)
-        .json({ message: "Only admins can switch branches" });
+      if (req.user.role !== "manager") {
+        return res.status(403).json({ message: "You are not allowed to switch branches" });
+      }
+      const allowed = new Set([
+        ...(req.user.allowedBranchIds ?? []),
+        ...(req.user.branchId ? [req.user.branchId] : []),
+      ].map(Number));
+      if (!allowed.has(Number(branchId))) {
+        return res.status(403).json({ message: "You don't have access to this branch" });
+      }
     }
 
     const [branch] = await db
@@ -356,6 +365,7 @@ exports.getCurrentUser = async (req, res) => {
         contact_number: users.contactNumber,
         branch_id: users.branchId,
         current_branch_id: users.currentBranchId,
+        allowed_branch_ids: users.allowedBranchIds,
         is_active: users.isActive,
         google_sub: users.googleSub,
         google_email: users.googleEmail,
@@ -385,6 +395,23 @@ exports.getCurrentUser = async (req, res) => {
     // Collapse joined objects to null when no related branch (supabase semantics).
     user.branch = user.branch?.id ? user.branch : null;
     user.currentBranch = user.currentBranch?.id ? user.currentBranch : null;
+
+    // Branches a manager may switch between (home + granted). Used by the branch
+    // switcher. Admins get all branches from /branches; cashiers get none.
+    user.allowed_branch_ids = user.allowed_branch_ids ?? [];
+    if (user.role === "manager") {
+      const ids = Array.from(
+        new Set([...(user.allowed_branch_ids || []), ...(user.branch_id ? [user.branch_id] : [])].map(Number)),
+      );
+      user.allowed_branches = ids.length
+        ? await db
+            .select({ id: branches.id, name: branches.name, code: branches.code, is_active: branches.isActive })
+            .from(branches)
+            .where(and(inArray(branches.id, ids), eq(branches.isActive, true)))
+        : [];
+    } else {
+      user.allowed_branches = [];
+    }
 
     // Expanded capability list drives what the UI renders for this user.
     user.permissions = permissionsForRole(user.role);

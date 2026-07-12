@@ -120,6 +120,9 @@ const users = pgTable("users", {
 	branchId: bigint("branch_id", { mode: "number" }),
 	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
 	currentBranchId: bigint("current_branch_id", { mode: "number" }),
+	// Branches a manager may switch between (subset access). Empty for admins
+	// (all branches) and cashiers (home branch only).
+	allowedBranchIds: bigint("allowed_branch_ids", { mode: "number" }).array().default([]).notNull(),
 	isActive: boolean("is_active").default(true).notNull(),
 	// Google account linking. googleSub is the stable Google subject id and the
 	// only key used to authenticate a Google login; googleEmail is audit/display

@@ -12,9 +12,11 @@ const TTL_LONG   = 5 * 60_000;   // 5 min  — weekly trend, top products (30-da
 // ─── Branch filter helper ─────────────────────────────────────────────────────
 
 function getActiveBranchId(user) {
-  if (user.role === "admin" && user.currentBranchId) return user.currentBranchId;
-  if (user.role !== "admin") return user.branchId;
-  return null; // admin with no currentBranchId → all branches
+  // Admin with no current branch → all branches (null). Everyone else (manager
+  // switching among allowed branches, or cashier) is scoped to their active
+  // branch, falling back to their home branch.
+  if (user.role === "admin") return user.currentBranchId || null;
+  return user.currentBranchId || user.branchId;
 }
 
 // ─── Get Dashboard Stats ──────────────────────────────────────────────────────
