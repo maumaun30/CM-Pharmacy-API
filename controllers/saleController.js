@@ -16,8 +16,10 @@ const { users, products, branchStocks, sales, saleItems, branches, discounts } =
 // db/bootstrap.sh). It atomically:
 //   1. inserts the sale header
 //   2. inserts each sale_item
-//   3. locks branch_stocks FOR UPDATE, validates + deducts stock, and RAISEs
-//      "Insufficient stock for product %" if any product is short
+//   3. for products with track_inventory = true, locks branch_stocks FOR UPDATE,
+//      validates + deducts stock, and RAISEs "Insufficient stock for product %"
+//      if any product is short. Products with track_inventory = false skip all
+//      branch_stocks handling (the pre-check in this controller skips them too).
 // Keep db/functions/create_sale.sql in sync with any changes to sale/stock logic.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -49,7 +51,9 @@ exports.createSale = async (req, res) => {
       }
     }
 
-    // ── 3. Fetch products with branch stock (inner join to the active branch) ──
+    // ── 3. Fetch products with branch stock (left join to the active branch) ──
+    // Left join so products that don't track inventory (no branch_stocks row)
+    // are still returned; stock is validated below only for tracked products.
     const productIds = cart.map((item) => item.productId || item.product.id);
 
     const rows = await db
@@ -57,11 +61,12 @@ exports.createSale = async (req, res) => {
         id: products.id,
         name: products.name,
         price: products.price,
+        track_inventory: products.trackInventory,
         branch_id: branchStocks.branchId,
         current_stock: branchStocks.currentStock,
       })
       .from(products)
-      .innerJoin(
+      .leftJoin(
         branchStocks,
         and(eq(branchStocks.productId, products.id), eq(branchStocks.branchId, activeBranchId))
       )
@@ -70,7 +75,13 @@ exports.createSale = async (req, res) => {
     const productMap = new Map(
       rows.map((r) => [
         r.id,
-        { id: r.id, name: r.name, price: r.price, branch_stocks: [{ branch_id: r.branch_id, current_stock: r.current_stock }] },
+        {
+          id: r.id,
+          name: r.name,
+          price: r.price,
+          track_inventory: r.track_inventory,
+          branch_stocks: r.branch_id != null ? [{ branch_id: r.branch_id, current_stock: r.current_stock }] : [],
+        },
       ])
     );
 
@@ -86,15 +97,20 @@ exports.createSale = async (req, res) => {
         return res.status(404).json({ message: `Product ID ${productId} not found` });
       }
 
-      const branchStock = product.branch_stocks[0];
-      if (!branchStock) {
-        return res.status(404).json({ message: `Product "${product.name}" not available at this branch` });
-      }
+      // Stock is only validated for products that track inventory. Untracked
+      // products (services / non-stock items) sell freely regardless of any
+      // branch_stocks row, matching the create_sale RPC.
+      if (product.track_inventory) {
+        const branchStock = product.branch_stocks[0];
+        if (!branchStock) {
+          return res.status(404).json({ message: `Product "${product.name}" not available at this branch` });
+        }
 
-      if (item.quantity > branchStock.current_stock) {
-        return res.status(400).json({
-          message: `Insufficient stock for ${product.name} at this branch. Available: ${branchStock.current_stock}, Requested: ${item.quantity}`,
-        });
+        if (item.quantity > branchStock.current_stock) {
+          return res.status(400).json({
+            message: `Insufficient stock for ${product.name} at this branch. Available: ${branchStock.current_stock}, Requested: ${item.quantity}`,
+          });
+        }
       }
 
       calculatedSubtotal += Number(product.price) * item.quantity;
@@ -202,6 +218,8 @@ exports.createSale = async (req, res) => {
 
     for (const item of cart) {
       const productId = item.productId || item.product.id;
+      // Untracked products have no branch_stocks row → nothing to broadcast.
+      if (!(productId in stockMap)) continue;
       const newStock = stockMap[productId];
       emitStockUpdate(activeBranchId, { productId, newStock });
       console.log(`📦 Stock update emitted: Product ${productId} -> ${newStock} units (Branch ${activeBranchId})`);

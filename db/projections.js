@@ -59,6 +59,7 @@ const productFull = {
   dosage: p.dosage,
   form: p.form,
   requires_prescription: p.requiresPrescription,
+  track_inventory: p.trackInventory,
   status: p.status,
   category_id: p.categoryId,
   created_at: p.createdAt,

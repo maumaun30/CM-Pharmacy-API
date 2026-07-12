@@ -279,6 +279,7 @@ const products = pgTable("products", {
 	dosage: text(),
 	form: text(),
 	requiresPrescription: boolean("requires_prescription").default(false).notNull(),
+	trackInventory: boolean("track_inventory").default(true).notNull(),
 	status: productStatus().default('ACTIVE').notNull(),
 	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
 	categoryId: bigint("category_id", { mode: "number" }).notNull(),

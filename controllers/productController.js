@@ -140,7 +140,7 @@ exports.createProduct = async (req, res) => {
     const {
       name, sku, barcode, description, price, cost,
       expiryDate, brandName, genericName, dosage, form,
-      requiresPrescription, status, categoryId,
+      requiresPrescription, trackInventory, status, categoryId,
       branchStocks: branchStockInput,
     } = req.body;
 
@@ -173,6 +173,7 @@ exports.createProduct = async (req, res) => {
         genericName,
         dosage, form,
         requiresPrescription: requiresPrescription || false,
+        trackInventory: trackInventory !== undefined ? trackInventory : true,
         status: status || "ACTIVE",
         categoryId,
       })
@@ -226,7 +227,7 @@ exports.updateProduct = async (req, res) => {
     const {
       name, sku, barcode, description, price, cost,
       expiryDate, brandName, genericName, dosage, form,
-      requiresPrescription, status, categoryId,
+      requiresPrescription, trackInventory, status, categoryId,
     } = req.body;
     const productId = req.params.id;
 
@@ -267,6 +268,7 @@ exports.updateProduct = async (req, res) => {
       dosage:               dosage               !== undefined ? dosage               : product.dosage,
       form:                 form                 !== undefined ? form                 : product.form,
       requiresPrescription: requiresPrescription !== undefined ? requiresPrescription : product.requires_prescription,
+      trackInventory:       trackInventory       !== undefined ? trackInventory       : product.track_inventory,
       status:               status               ?? product.status,
       categoryId:           categoryId           ?? product.category_id,
     };
