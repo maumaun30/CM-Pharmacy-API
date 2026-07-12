@@ -10,6 +10,10 @@ FROM node:22-alpine AS runtime
 WORKDIR /app
 ENV NODE_ENV=production
 
+# Alpine ships no timezone database; install it so TZ=Asia/Manila resolves
+# (server-side "today"/report boundaries run in PH time).
+RUN apk add --no-cache tzdata
+
 # Copy resolved production node_modules, then the app source.
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
