@@ -22,6 +22,7 @@ router.post(
 );
 
 router.get("/me", authenticateUser, authController.getCurrentUser);
+router.put("/change-password", authenticateUser, authController.changePassword);
 
 // Read-only role→permission matrix (Settings page).
 router.get(

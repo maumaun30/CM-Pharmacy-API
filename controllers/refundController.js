@@ -1,4 +1,5 @@
-const { and, eq, desc, inArray, sql } = require("drizzle-orm");
+const bcrypt = require("bcryptjs");
+const { and, eq, desc, inArray, isNotNull, sql } = require("drizzle-orm");
 const { db, schema } = require("../config/db");
 const { createLog } = require("../middleware/logMiddleware");
 const { dbErrorMessage } = require("../utils/dbError");
@@ -18,7 +19,7 @@ const { users, products, branchStocks, sales, saleItems, refunds, refundItems } 
 exports.createRefund = async (req, res) => {
   try {
     const { saleId } = req.params;
-    const { items, reason } = req.body;
+    const { items, reason, managerPin } = req.body;
 
     // ── 1. Input validation ──────────────────────────────────────────────────
     if (!items || !Array.isArray(items) || items.length === 0) {
@@ -57,6 +58,45 @@ exports.createRefund = async (req, res) => {
       return res.status(403).json({
         message: "You are not allowed to refund sales from other branches",
       });
+    }
+
+    // ── 3a. Authorization ────────────────────────────────────────────────────
+    // Admin/manager refund directly. Anyone else (cashier) must supply a valid
+    // manager/admin PIN to authorize the refund; we record who authorized it.
+    let authorizer = null;
+    const canRefundDirectly = user.role === "admin" || user.role === "manager";
+    if (!canRefundDirectly) {
+      if (!managerPin) {
+        return res.status(403).json({
+          message: "A manager PIN is required to authorize this refund.",
+        });
+      }
+      const supervisors = await db
+        .select({
+          id: users.id,
+          username: users.username,
+          role: users.role,
+          pin: users.pin,
+          branch_id: users.branchId,
+          current_branch_id: users.currentBranchId,
+        })
+        .from(users)
+        .where(and(inArray(users.role, ["admin", "manager"]), isNotNull(users.pin), eq(users.isActive, true)));
+
+      for (const s of supervisors) {
+        // Admins can authorize anywhere; a manager only at their own branch.
+        const branchOk =
+          s.role === "admin" ||
+          s.branch_id === activeBranchId ||
+          s.current_branch_id === activeBranchId;
+        if (branchOk && (await bcrypt.compare(String(managerPin), s.pin))) {
+          authorizer = s;
+          break;
+        }
+      }
+      if (!authorizer) {
+        return res.status(403).json({ message: "Invalid manager PIN." });
+      }
     }
 
     sale.items = await db
@@ -173,6 +213,9 @@ exports.createRefund = async (req, res) => {
         totalRefund: calculatedTotalRefund,
         reason: reason || null,
         branch: sale.branch_id,
+        authorizedBy: authorizer
+          ? { id: authorizer.id, username: authorizer.username, role: authorizer.role }
+          : null,
       }
     );
 

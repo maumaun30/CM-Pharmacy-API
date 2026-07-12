@@ -234,6 +234,41 @@ exports.updateProfile = async (req, res) => {
   }
 };
 
+// ─── Change Password ──────────────────────────────────────────────────────────
+// The logged-in user changes their own password. Unlike updateProfile, this
+// verifies the current password first (self-service change flow).
+exports.changePassword = async (req, res) => {
+  try {
+    const { currentPassword, newPassword } = req.body;
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ message: "Current and new password are required" });
+    }
+    if (String(newPassword).length < 6) {
+      return res.status(400).json({ message: "New password must be at least 6 characters" });
+    }
+
+    const [user] = await db
+      .select({ id: users.id, password: users.password })
+      .from(users)
+      .where(eq(users.id, req.user.id))
+      .limit(1);
+
+    if (!user) return res.status(404).json({ message: "User not found" });
+
+    const ok = await bcrypt.compare(String(currentPassword), user.password);
+    if (!ok) return res.status(400).json({ message: "Current password is incorrect" });
+
+    const hashed = await bcrypt.hash(String(newPassword), 10);
+    await db.update(users).set({ password: hashed }).where(eq(users.id, user.id));
+
+    await createLog(req, "UPDATE", "users", user.id, "Changed own password", {});
+
+    return res.status(200).json({ message: "Password changed successfully" });
+  } catch (error) {
+    return res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
 // ─── Switch Branch ────────────────────────────────────────────────────────────
 
 exports.switchBranch = async (req, res) => {
