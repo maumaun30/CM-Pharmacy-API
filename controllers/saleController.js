@@ -6,6 +6,7 @@ const {
   emitNewSale,
   emitDashboardRefresh,
   emitStockUpdate,
+  emitLowStockAlert,
 } = require("../utils/socket");
 
 const { users, products, branchStocks, sales, saleItems, branches, discounts } = schema;
@@ -190,12 +191,18 @@ exports.createSale = async (req, res) => {
       .limit(1);
 
     // ── 9. Fetch updated stock levels for socket emissions ────────────────────
+    // Also pull thresholds so a sale that drives stock low/critical raises an alert.
     const updatedStocks = await db
-      .select({ product_id: branchStocks.productId, current_stock: branchStocks.currentStock })
+      .select({
+        product_id: branchStocks.productId,
+        current_stock: branchStocks.currentStock,
+        reorder_point: branchStocks.reorderPoint,
+        minimum_stock: branchStocks.minimumStock,
+      })
       .from(branchStocks)
       .where(and(eq(branchStocks.branchId, activeBranchId), inArray(branchStocks.productId, productIds)));
 
-    const stockMap = Object.fromEntries(updatedStocks.map((s) => [s.product_id, s.current_stock]));
+    const stockMap = Object.fromEntries(updatedStocks.map((s) => [s.product_id, s]));
 
     // ── 10. Socket emissions ───────────────────────────────────────────────────
     if (completeSale) {
@@ -220,9 +227,25 @@ exports.createSale = async (req, res) => {
       const productId = item.productId || item.product.id;
       // Untracked products have no branch_stocks row → nothing to broadcast.
       if (!(productId in stockMap)) continue;
-      const newStock = stockMap[productId];
+      const row = stockMap[productId];
+      const newStock = row.current_stock;
       emitStockUpdate(activeBranchId, { productId, newStock });
       console.log(`📦 Stock update emitted: Product ${productId} -> ${newStock} units (Branch ${activeBranchId})`);
+
+      // If this sale drove the product to/below its reorder point, alert the
+      // branch (and admins). The client distinguishes critical (≤ minimum) from
+      // low using the thresholds in the payload.
+      if (row.reorder_point != null && newStock <= row.reorder_point) {
+        const product = productMap.get(productId);
+        emitLowStockAlert(activeBranchId, {
+          id: productId,
+          name: product?.name ?? `#${productId}`,
+          current_stock: newStock,
+          reorder_point: row.reorder_point,
+          minimum_stock: row.minimum_stock,
+          branch_id: activeBranchId,
+        });
+      }
     }
 
     // ── 11. Response ───────────────────────────────────────────────────────────
