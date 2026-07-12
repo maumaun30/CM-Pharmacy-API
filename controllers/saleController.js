@@ -26,7 +26,10 @@ const { users, products, branchStocks, sales, saleItems, branches, discounts } =
 
 exports.createSale = async (req, res) => {
   try {
-    const { cart, subtotal, totalDiscount, total, cashAmount } = req.body;
+    const {
+      cart, subtotal, totalDiscount, total, cashAmount,
+      customerName, customerIdNumber, customerDiscountType,
+    } = req.body;
 
     // ── 1. Resolve user and active branch ────────────────────────────────────
     const [user] = await db
@@ -160,7 +163,10 @@ exports.createSale = async (req, res) => {
         ${calculatedTotal}::numeric,
         ${parsedCash}::numeric,
         ${parsedCash !== null ? parsedCash - calculatedTotal : null}::numeric,
-        ${JSON.stringify(rpcItems)}::jsonb
+        ${JSON.stringify(rpcItems)}::jsonb,
+        ${customerName || null}::text,
+        ${customerIdNumber || null}::text,
+        ${customerDiscountType || null}::text
       ) as sale_id
     `);
     // create_sale returns bigint; node-pg yields it as a string.
@@ -295,6 +301,9 @@ exports.getSales = async (req, res) => {
         total_amount: sales.totalAmount,
         cash_amount: sales.cashAmount,
         change_amount: sales.changeAmount,
+        customer_name: sales.customerName,
+        customer_id_number: sales.customerIdNumber,
+        customer_discount_type: sales.customerDiscountType,
         sold_at: sales.soldAt,
         sold_by: sales.soldBy,
         branch_id: sales.branchId,
@@ -320,7 +329,7 @@ exports.getSales = async (req, res) => {
             discounted_price: saleItems.discountedPrice,
             discount_amount: saleItems.discountAmount,
             product: { id: products.id, name: products.name },
-            discount: { id: discounts.id, name: discounts.name, discount_type: discounts.discountType, discount_value: discounts.discountValue },
+            discount: { id: discounts.id, name: discounts.name, discount_type: discounts.discountType, discount_value: discounts.discountValue, discount_category: discounts.discountCategory },
           })
           .from(saleItems)
           .leftJoin(products, eq(saleItems.productId, products.id))
@@ -347,6 +356,9 @@ exports.getSales = async (req, res) => {
         totalAmount: parseFloat(sale.total_amount),
         cashAmount: sale.cash_amount ? parseFloat(sale.cash_amount) : null,
         changeAmount: sale.change_amount ? parseFloat(sale.change_amount) : null,
+        customerName: sale.customer_name ?? null,
+        customerIdNumber: sale.customer_id_number ?? null,
+        customerDiscountType: sale.customer_discount_type ?? null,
         soldAt: sale.sold_at,
         soldBy: sale.sold_by,
         status: sale.status,
@@ -375,6 +387,7 @@ exports.getSales = async (req, res) => {
                   name: discount.name,
                   type: discount.discount_type,
                   value: parseFloat(discount.discount_value),
+                  category: discount.discount_category,
                 }
               : null,
           };

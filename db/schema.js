@@ -47,6 +47,9 @@ const sales = pgTable("sales", {
 	totalAmount: numeric("total_amount", { precision: 10, scale: 2, mode: "number" }).notNull(),
 	cashAmount: numeric("cash_amount", { precision: 10, scale: 2, mode: "number" }),
 	changeAmount: numeric("change_amount", { precision: 10, scale: 2, mode: "number" }),
+	customerName: text("customer_name"),
+	customerIdNumber: text("customer_id_number"),
+	customerDiscountType: text("customer_discount_type"),
 	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
 	soldBy: bigint("sold_by", { mode: "number" }).notNull(),
 	soldAt: timestamp("sold_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),

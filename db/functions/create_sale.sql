@@ -5,6 +5,12 @@
 -- stock, and writes a stock ledger row. Products with track_inventory = false
 -- (services / non-stock items) skip all branch_stocks handling entirely.
 
+-- Adding args changes the signature, so drop the previous 8-arg version first
+-- (CREATE OR REPLACE would otherwise leave it as an ambiguous overload).
+drop function if exists create_sale(
+  bigint, bigint, numeric, numeric, numeric, numeric, numeric, jsonb
+);
+
 create or replace function create_sale(
   p_sold_by      bigint,
   p_branch_id    bigint,
@@ -13,8 +19,11 @@ create or replace function create_sale(
   p_total        numeric,
   p_cash         numeric,
   p_change       numeric,
-  p_items        jsonb
+  p_items        jsonb,
   -- [{ product_id, quantity, price, discounted_price, discount_id, discount_amount }]
+  p_customer_name          text default null,
+  p_customer_id_number     text default null,
+  p_customer_discount_type text default null
 )
 returns bigint as $$
 declare
@@ -29,11 +38,13 @@ begin
   -- 1. Create sale header
   insert into sales (
     sold_by, branch_id, subtotal, total_discount,
-    total_amount, cash_amount, change_amount
+    total_amount, cash_amount, change_amount,
+    customer_name, customer_id_number, customer_discount_type
   )
   values (
     p_sold_by, p_branch_id, p_subtotal, p_discount,
-    p_total, p_cash, p_change
+    p_total, p_cash, p_change,
+    p_customer_name, p_customer_id_number, p_customer_discount_type
   )
   returning id into v_sale_id;
 
