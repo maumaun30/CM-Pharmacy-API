@@ -1,9 +1,10 @@
 -- Atomic sale creation. Source of truth for sale + stock mutation.
 -- Kept in sync with the documenting comment in controllers/saleController.js.
 -- Inserts the sale header, each sale_item, and (for products with
--- track_inventory = true) locks branch_stocks FOR UPDATE, validates + deducts
--- stock, and writes a stock ledger row. Products with track_inventory = false
--- (services / non-stock items) skip all branch_stocks handling entirely.
+-- track_inventory = true) locks branch_stocks FOR UPDATE, deducts stock (which
+-- MAY go negative — overselling is allowed; the next stock-in nets it out), and
+-- writes a stock ledger row. Products with track_inventory = false (services /
+-- non-stock items) skip all branch_stocks handling entirely.
 
 -- Adding args changes the signature, so drop the previous 8-arg version first
 -- (CREATE OR REPLACE would otherwise leave it as an ambiguous overload).
@@ -87,12 +88,9 @@ begin
           v_product_id, p_branch_id;
       end if;
 
+      -- Overselling is allowed for tracked products: stock may go negative, and
+      -- the next stock-in nets it out automatically (quantity_before + received).
       v_new_stock := v_current_stock - v_quantity;
-
-      if v_new_stock < 0 then
-        raise exception 'Insufficient stock for product %. Available: %, Requested: %',
-          v_product_id, v_current_stock, v_quantity;
-      end if;
 
       -- Deduct stock
       update branch_stocks

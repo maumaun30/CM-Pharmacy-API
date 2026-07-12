@@ -17,10 +17,10 @@ const { users, products, branchStocks, sales, saleItems, branches, discounts } =
 // db/bootstrap.sh). It atomically:
 //   1. inserts the sale header
 //   2. inserts each sale_item
-//   3. for products with track_inventory = true, locks branch_stocks FOR UPDATE,
-//      validates + deducts stock, and RAISEs "Insufficient stock for product %"
-//      if any product is short. Products with track_inventory = false skip all
-//      branch_stocks handling (the pre-check in this controller skips them too).
+//   3. for products with track_inventory = true, locks branch_stocks FOR UPDATE
+//      and deducts stock (which MAY go negative — overselling is allowed; the
+//      next stock-in nets it out). Products with track_inventory = false skip
+//      all branch_stocks handling (the pre-check in this controller skips them).
 // Keep db/functions/create_sale.sql in sync with any changes to sale/stock logic.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -101,19 +101,14 @@ exports.createSale = async (req, res) => {
         return res.status(404).json({ message: `Product ID ${productId} not found` });
       }
 
-      // Stock is only validated for products that track inventory. Untracked
-      // products (services / non-stock items) sell freely regardless of any
-      // branch_stocks row, matching the create_sale RPC.
+      // Tracked products must be set up at the branch (have a branch_stocks
+      // row), but overselling is allowed: stock may go negative and the next
+      // stock-in nets it out. Untracked products (services / non-stock items)
+      // sell freely regardless, matching the create_sale RPC.
       if (product.track_inventory) {
         const branchStock = product.branch_stocks[0];
         if (!branchStock) {
           return res.status(404).json({ message: `Product "${product.name}" not available at this branch` });
-        }
-
-        if (item.quantity > branchStock.current_stock) {
-          return res.status(400).json({
-            message: `Insufficient stock for ${product.name} at this branch. Available: ${branchStock.current_stock}, Requested: ${item.quantity}`,
-          });
         }
       }
 
