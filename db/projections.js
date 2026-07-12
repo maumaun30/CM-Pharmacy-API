@@ -20,6 +20,7 @@ const branchFull = {
   postal_code: b.postalCode,
   phone: b.phone,
   email: b.email,
+  tin: b.tin,
   manager_name: b.managerName,
   is_active: b.isActive,
   is_main_branch: b.isMainBranch,

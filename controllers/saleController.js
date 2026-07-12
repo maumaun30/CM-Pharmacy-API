@@ -308,7 +308,11 @@ exports.getSales = async (req, res) => {
         sold_by: sales.soldBy,
         branch_id: sales.branchId,
         status: sales.status,
-        branch: { id: branches.id, name: branches.name, code: branches.code },
+        branch: {
+          id: branches.id, name: branches.name, code: branches.code,
+          address: branches.address, city: branches.city, province: branches.province,
+          postal_code: branches.postalCode, phone: branches.phone, tin: branches.tin,
+        },
         seller: { id: users.id, username: users.username, email: users.email, first_name: users.firstName, last_name: users.lastName },
       })
       .from(sales)

@@ -329,10 +329,14 @@ exports.getCurrentUser = async (req, res) => {
         branch: {
           id: homeBranch.id, name: homeBranch.name, code: homeBranch.code,
           is_active: homeBranch.isActive, email: homeBranch.email, phone: homeBranch.phone,
+          address: homeBranch.address, city: homeBranch.city, province: homeBranch.province,
+          postal_code: homeBranch.postalCode, tin: homeBranch.tin,
         },
         currentBranch: {
           id: curBranch.id, name: curBranch.name, code: curBranch.code,
           is_active: curBranch.isActive, email: curBranch.email, phone: curBranch.phone,
+          address: curBranch.address, city: curBranch.city, province: curBranch.province,
+          postal_code: curBranch.postalCode, tin: curBranch.tin,
         },
       })
       .from(users)

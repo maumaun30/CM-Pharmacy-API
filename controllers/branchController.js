@@ -71,7 +71,7 @@ exports.createBranch = async (req, res) => {
   try {
     const {
       name, code, address, city, province,
-      postalCode, phone, email, managerName,
+      postalCode, phone, email, tin, managerName,
       isActive, isMainBranch, operatingHours,
     } = req.body;
 
@@ -105,6 +105,7 @@ exports.createBranch = async (req, res) => {
         postalCode: postalCode,
         phone,
         email,
+        tin,
         managerName: managerName,
         isActive: isActive !== undefined ? isActive : true,
         isMainBranch: isMainBranch || false,
@@ -132,7 +133,7 @@ exports.updateBranch = async (req, res) => {
     const branchId = req.params.id;
     const {
       name, code, address, city, province,
-      postalCode, phone, email, managerName,
+      postalCode, phone, email, tin, managerName,
       isActive, isMainBranch, operatingHours,
     } = req.body;
 
@@ -170,6 +171,7 @@ exports.updateBranch = async (req, res) => {
       postalCode:     postalCode     !== undefined ? postalCode     : branch.postal_code,
       phone:          phone          !== undefined ? phone          : branch.phone,
       email:          email          !== undefined ? email          : branch.email,
+      tin:            tin            !== undefined ? tin            : branch.tin,
       managerName:    managerName    !== undefined ? managerName    : branch.manager_name,
       isActive:       isActive       !== undefined ? isActive       : branch.is_active,
       isMainBranch:   isMainBranch   !== undefined ? isMainBranch   : branch.is_main_branch,

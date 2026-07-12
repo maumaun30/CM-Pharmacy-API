@@ -23,6 +23,7 @@ const branches = pgTable("branches", {
 	postalCode: varchar("postal_code", { length: 20 }),
 	phone: varchar({ length: 50 }),
 	email: text(),
+	tin: text(),
 	managerName: text("manager_name"),
 	isActive: boolean("is_active").default(true).notNull(),
 	isMainBranch: boolean("is_main_branch").default(false).notNull(),
