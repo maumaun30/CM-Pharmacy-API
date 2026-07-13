@@ -32,7 +32,8 @@ router.get(
   authController.getRoles,
 );
 
-router.post("/login-pin", authController.loginWithPin);
+// PIN is a manager-override credential (e.g. refund approval), not a login
+// method — the old /login-pin endpoint was removed with the login page's PIN mode.
 router.put("/pin", authenticateUser, authController.setPin);
 
 // Google account linking (web + mobile share these endpoints).
