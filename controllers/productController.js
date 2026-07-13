@@ -310,6 +310,16 @@ exports.deleteProduct = async (req, res) => {
 
     return res.status(200).json({ message: "Product deleted successfully" });
   } catch (error) {
+    // sale_items/refund_items reference products with ON DELETE RESTRICT, so
+    // Postgres blocks deleting any product with sales history (error 23503).
+    // Drizzle may wrap the pg error, so check the cause too.
+    const pgCode = error?.code || error?.cause?.code;
+    if (pgCode === "23503") {
+      return res.status(409).json({
+        message:
+          "This product has sales or refund history and can't be deleted. Set it to Inactive instead to hide it from the POS.",
+      });
+    }
     return res.status(500).json({ message: "Server error", error: error.message });
   }
 };
