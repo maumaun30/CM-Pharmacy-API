@@ -5,7 +5,9 @@
 	email admin@devmau.site
 }
 
-cm-api.devmau.site {
+# Both hostnames route to the same API container. cm-api.devmau.site is kept
+# during the maunpharmacy.com migration; remove it once all clients cut over.
+cm-api.devmau.site, api.maunpharmacy.com {
 	# Proxy all traffic (including Socket.IO WebSocket upgrades) to the API
 	# container on the internal Docker network. Caddy handles WS transparently.
 	reverse_proxy api:5000
