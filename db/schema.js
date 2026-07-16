@@ -240,6 +240,83 @@ const refunds = pgTable("refunds", {
 		}).onUpdate("cascade").onDelete("restrict"),
 ]);
 
+const refundRequests = pgTable("refund_requests", {
+	id: bigserial({ mode: "number" }).primaryKey().notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	saleId: bigint("sale_id", { mode: "number" }).notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	branchId: bigint("branch_id", { mode: "number" }).notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	requestedBy: bigint("requested_by", { mode: "number" }).notNull(),
+	items: jsonb().notNull(),
+	reason: text(),
+	totalRefund: numeric("total_refund", { precision: 10, scale: 2, mode: "number" }).default(0).notNull(),
+	status: text().default('pending').notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	reviewedBy: bigint("reviewed_by", { mode: "number" }),
+	reviewNote: text("review_note"),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	refundId: bigint("refund_id", { mode: "number" }),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	reviewedAt: timestamp("reviewed_at", { withTimezone: true, mode: 'string' }),
+}, (table) => [
+	index("idx_refund_requests_status_branch").using("btree", table.status.asc().nullsLast().op("text_ops"), table.branchId.asc().nullsLast().op("int8_ops")),
+	index("idx_refund_requests_sale_id").using("btree", table.saleId.asc().nullsLast().op("int8_ops")),
+	index("idx_refund_requests_requested_by").using("btree", table.requestedBy.asc().nullsLast().op("int8_ops")),
+	foreignKey({
+			columns: [table.saleId],
+			foreignColumns: [sales.id],
+			name: "refund_requests_sale_id_fkey"
+		}).onUpdate("cascade").onDelete("restrict"),
+	foreignKey({
+			columns: [table.branchId],
+			foreignColumns: [branches.id],
+			name: "refund_requests_branch_id_fkey"
+		}).onUpdate("cascade").onDelete("restrict"),
+	foreignKey({
+			columns: [table.requestedBy],
+			foreignColumns: [users.id],
+			name: "refund_requests_requested_by_fkey"
+		}).onUpdate("cascade").onDelete("restrict"),
+	foreignKey({
+			columns: [table.reviewedBy],
+			foreignColumns: [users.id],
+			name: "refund_requests_reviewed_by_fkey"
+		}).onUpdate("cascade").onDelete("set null"),
+	foreignKey({
+			columns: [table.refundId],
+			foreignColumns: [refunds.id],
+			name: "refund_requests_refund_id_fkey"
+		}).onUpdate("cascade").onDelete("set null"),
+]);
+
+const notifications = pgTable("notifications", {
+	id: bigserial({ mode: "number" }).primaryKey().notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	userId: bigint("user_id", { mode: "number" }).notNull(),
+	type: text().notNull(),
+	title: text().notNull(),
+	body: text().notNull(),
+	data: jsonb().default({}).notNull(),
+	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
+	branchId: bigint("branch_id", { mode: "number" }),
+	isRead: boolean("is_read").default(false).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("idx_notifications_user_unread").using("btree", table.userId.asc().nullsLast().op("int8_ops"), table.isRead.asc().nullsLast().op("bool_ops")),
+	index("idx_notifications_created_at").using("btree", table.createdAt.asc().nullsLast().op("timestamptz_ops")),
+	foreignKey({
+			columns: [table.userId],
+			foreignColumns: [users.id],
+			name: "notifications_user_id_fkey"
+		}).onUpdate("cascade").onDelete("cascade"),
+	foreignKey({
+			columns: [table.branchId],
+			foreignColumns: [branches.id],
+			name: "notifications_branch_id_fkey"
+		}).onUpdate("cascade").onDelete("set null"),
+]);
+
 const refundItems = pgTable("refund_items", {
 	id: bigserial({ mode: "number" }).primaryKey().notNull(),
 	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
@@ -444,6 +521,8 @@ module.exports = {
   logs,
   refunds,
   refundItems,
+  refundRequests,
+  notifications,
   products,
   stocks,
   discounts,
