@@ -9,6 +9,7 @@ const {
   emitStockUpdate,
   emitLowStockAlert,
 } = require("../utils/socket");
+const { notifyLowStock } = require("../utils/notifications");
 
 const { users, products, branchStocks, sales, saleItems, branches, discounts } = schema;
 
@@ -243,14 +244,17 @@ exports.createSale = async (req, res) => {
       // low using the thresholds in the payload.
       if (row.reorder_point != null && newStock <= row.reorder_point) {
         const product = productMap.get(productId);
-        emitLowStockAlert(activeBranchId, {
+        const lowStockPayload = {
           id: productId,
           name: product?.name ?? `#${productId}`,
           current_stock: newStock,
           reorder_point: row.reorder_point,
           minimum_stock: row.minimum_stock,
           branch_id: activeBranchId,
-        });
+        };
+        emitLowStockAlert(activeBranchId, lowStockPayload);
+        // Persisted bell notification for supervisors (deduped per product; never throws).
+        notifyLowStock(activeBranchId, lowStockPayload);
       }
     }
 

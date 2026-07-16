@@ -3,6 +3,7 @@ const { db, schema } = require("../config/db");
 const { stockFull } = require("../db/projections");
 const { createLog } = require("../middleware/logMiddleware");
 const { emitStockUpdate, emitLowStockAlert, emitDashboardRefresh } = require("../utils/socket");
+const { notifyLowStock } = require("../utils/notifications");
 const { invalidate } = require("../utils/cache");
 
 const { stocks, products, users, branches, branchStocks } = schema;
@@ -45,7 +46,7 @@ const getUserActiveBranch = async (userId) => {
 
 const maybeEmitLowStock = (activeBranchId, branchStock, product, quantityAfter) => {
   if (quantityAfter <= branchStock.reorder_point) {
-    emitLowStockAlert(activeBranchId, {
+    const payload = {
       id:            product.id,
       name:          product.name,
       sku:           product.sku,
@@ -53,7 +54,10 @@ const maybeEmitLowStock = (activeBranchId, branchStock, product, quantityAfter) 
       reorder_point: branchStock.reorder_point,
       minimum_stock: branchStock.minimum_stock,
       branch_id:     activeBranchId,
-    });
+    };
+    emitLowStockAlert(activeBranchId, payload);
+    // Persisted bell notification for supervisors (deduped per product; never throws).
+    notifyLowStock(activeBranchId, payload);
   }
 };
 
