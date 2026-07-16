@@ -73,6 +73,9 @@ const initializeSocket = (server) => {
     if (effectiveBranch) {
       socket.join(`branch-${effectiveBranch}`);
     }
+    // Personal room for targeted delivery (notifications). Identity-derived
+    // from the authenticated socket — never from client input.
+    socket.join(`user-${id}`);
 
     // Branch switching stays available but is now guarded: a non-admin can only
     // (re)join their own branch; admins may follow any branch.
@@ -204,6 +207,56 @@ const emitDashboardRefresh = (branchId = null) => {
   }
 };
 
+/**
+ * Emit new refund request (to the branch's supervisors + admins)
+ * @param {number} branchId - Branch the sale/request belongs to
+ * @param {object} payload - snake_case refund_request row
+ */
+const emitRefundRequestNew = (branchId, payload) => {
+  try {
+    const io = getIO();
+    if (branchId) {
+      io.to(`branch-${branchId}`).emit("refund-request:new", payload);
+      console.log(`🧾 Emitted refund-request:new to branch-${branchId}:`, payload.id);
+    }
+    io.to("admin-all").emit("refund-request:new", payload);
+  } catch (error) {
+    console.error("Error emitting refund-request:new:", error);
+  }
+};
+
+/**
+ * Emit refund request resolution (approved/declined)
+ * @param {number} branchId - Branch the request belongs to
+ * @param {object} payload - snake_case refund_request row (includes status, requested_by)
+ */
+const emitRefundRequestResolved = (branchId, payload) => {
+  try {
+    const io = getIO();
+    if (branchId) {
+      io.to(`branch-${branchId}`).emit("refund-request:resolved", payload);
+      console.log(`🧾 Emitted refund-request:resolved to branch-${branchId}:`, payload.id, payload.status);
+    }
+    io.to("admin-all").emit("refund-request:resolved", payload);
+  } catch (error) {
+    console.error("Error emitting refund-request:resolved:", error);
+  }
+};
+
+/**
+ * Emit a notification to a single user's personal room
+ * @param {number} userId - Recipient user id
+ * @param {object} notification - snake_case notifications row
+ */
+const emitNotificationNew = (userId, notification) => {
+  try {
+    const io = getIO();
+    io.to(`user-${userId}`).emit("notification:new", notification);
+  } catch (error) {
+    console.error("Error emitting notification:new:", error);
+  }
+};
+
 module.exports = {
   initializeSocket,
   getIO,
@@ -211,4 +264,7 @@ module.exports = {
   emitStockUpdate,
   emitLowStockAlert,
   emitDashboardRefresh,
+  emitRefundRequestNew,
+  emitRefundRequestResolved,
+  emitNotificationNew,
 };
