@@ -2,7 +2,8 @@ const express = require("express");
 const router = express.Router();
 const saleController = require("../controllers/saleController");
 const refundController = require("../controllers/refundController");
-const { authenticateUser } = require("../middleware/authMiddleware");
+const refundRequestController = require("../controllers/refundRequestController");
+const { authenticateUser, requirePermission } = require("../middleware/authMiddleware");
 
 router.use(authenticateUser);
 
@@ -15,5 +16,12 @@ router.get("/", saleController.getSales);
 // refunds stays open like viewing sales.
 router.post("/:saleId/refunds", refundController.createRefund);
 router.get("/:saleId/refunds", refundController.getRefundsBySale);
+
+// Async alternative to the PIN flow: submit a request for remote approval.
+router.post(
+  "/:saleId/refund-requests",
+  requirePermission("refund_requests.create"),
+  refundRequestController.createRefundRequest
+);
 
 module.exports = router;

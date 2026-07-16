@@ -17,22 +17,114 @@ const { users, products, branchStocks, sales, saleItems, refunds, refundItems } 
 // refund/stock logic changes.
 // ─────────────────────────────────────────────────────────────────────────────
 
+// ─────────────────────────────────────────────────────────────────────────────
+// Shared refund validation — used by the direct refund path below AND the
+// async refund-request path (refundRequestController). Fetches the sale with
+// its items, applies already-refunded quantities, validates the requested
+// items, and computes totals + the sale's next status.
+//
+// Throws { status, message } on any validation failure.
+// Returns { sale, stockUpdates, calculatedTotalRefund, newSaleStatus }.
+// ─────────────────────────────────────────────────────────────────────────────
+async function validateRefundItems(saleId, requestItems) {
+  if (!requestItems || !Array.isArray(requestItems) || requestItems.length === 0) {
+    throw { status: 400, message: "Refund items are required" };
+  }
+  for (const item of requestItems) {
+    if (!item.saleItemId || !item.quantity || item.quantity <= 0) {
+      throw {
+        status: 400,
+        message: "Each refund item must have a valid saleItemId and quantity",
+      };
+    }
+  }
+
+  const [sale] = await db
+    .select({ id: sales.id, branch_id: sales.branchId, status: sales.status })
+    .from(sales)
+    .where(eq(sales.id, saleId))
+    .limit(1);
+
+  if (!sale) throw { status: 404, message: "Sale not found" };
+
+  sale.items = await db
+    .select({
+      id: saleItems.id,
+      product_id: saleItems.productId,
+      quantity: saleItems.quantity,
+      price: saleItems.price,
+      discounted_price: saleItems.discountedPrice,
+      product: { id: products.id, name: products.name },
+    })
+    .from(saleItems)
+    .leftJoin(products, eq(saleItems.productId, products.id))
+    .where(eq(saleItems.saleId, saleId));
+
+  const existingRefundItems = await db
+    .select({ sale_item_id: refundItems.saleItemId, quantity: refundItems.quantity })
+    .from(refundItems)
+    .innerJoin(refunds, eq(refundItems.refundId, refunds.id))
+    .where(eq(refunds.saleId, saleId));
+
+  const alreadyRefunded = existingRefundItems.reduce((acc, ri) => {
+    acc[ri.sale_item_id] = (acc[ri.sale_item_id] || 0) + ri.quantity;
+    return acc;
+  }, {});
+
+  const saleItemMap = new Map(sale.items.map((si) => [si.id, si]));
+  let calculatedTotalRefund = 0;
+  const stockUpdates = [];
+
+  for (const item of requestItems) {
+    const saleItem = saleItemMap.get(item.saleItemId);
+    if (!saleItem) {
+      throw {
+        status: 404,
+        message: `SaleItem ID ${item.saleItemId} does not belong to Sale #${saleId}`,
+      };
+    }
+
+    const previouslyRefunded = alreadyRefunded[item.saleItemId] || 0;
+    const refundableQty = saleItem.quantity - previouslyRefunded;
+
+    if (item.quantity > refundableQty) {
+      throw {
+        status: 400,
+        message: `Cannot refund ${item.quantity} of "${saleItem.product.name}". Refundable: ${refundableQty}`,
+      };
+    }
+
+    const unitPrice = saleItem.discounted_price
+      ? Number(saleItem.discounted_price)
+      : Number(saleItem.price);
+    const refundAmount = unitPrice * item.quantity;
+
+    calculatedTotalRefund += refundAmount;
+    stockUpdates.push({
+      productId: saleItem.product_id,
+      quantity: item.quantity,
+      saleItemId: saleItem.id,
+      refundAmount,
+      unitPrice,
+    });
+  }
+
+  const totalSaleQty = sale.items.reduce((s, i) => s + i.quantity, 0);
+  const totalRefundedQty =
+    Object.values(alreadyRefunded).reduce((s, q) => s + q, 0) +
+    requestItems.reduce((s, i) => s + i.quantity, 0);
+
+  const newSaleStatus =
+    totalRefundedQty >= totalSaleQty ? "fully_refunded" : "partially_refunded";
+
+  return { sale, stockUpdates, calculatedTotalRefund, newSaleStatus };
+}
+exports.validateRefundItems = validateRefundItems;
+
 exports.createRefund = async (req, res) => {
   try {
     const { saleId } = req.params;
     const { items, reason, managerPin } = req.body;
-
-    // ── 1. Input validation ──────────────────────────────────────────────────
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ message: "Refund items are required" });
-    }
-    for (const item of items) {
-      if (!item.saleItemId || !item.quantity || item.quantity <= 0) {
-        return res.status(400).json({
-          message: "Each refund item must have a valid saleItemId and quantity",
-        });
-      }
-    }
 
     // ── 2. Resolve user and active branch ────────────────────────────────────
     const [user] = await db
@@ -46,14 +138,15 @@ exports.createRefund = async (req, res) => {
       return res.status(400).json({ message: "User is not assigned to any branch" });
     }
 
-    // ── 3. Fetch the original sale with its items ────────────────────────────
-    const [sale] = await db
-      .select({ id: sales.id, branch_id: sales.branchId, status: sales.status })
-      .from(sales)
-      .where(eq(sales.id, saleId))
-      .limit(1);
-
-    if (!sale) return res.status(404).json({ message: "Sale not found" });
+    // ── 3. Fetch + validate via the shared helper ────────────────────────────
+    let sale, stockUpdates, calculatedTotalRefund, newSaleStatus;
+    try {
+      ({ sale, stockUpdates, calculatedTotalRefund, newSaleStatus } =
+        await validateRefundItems(saleId, items));
+    } catch (v) {
+      if (v && v.status) return res.status(v.status).json({ message: v.message });
+      throw v;
+    }
 
     if (user.role !== "admin" && sale.branch_id !== activeBranchId) {
       return res.status(403).json({
@@ -100,76 +193,7 @@ exports.createRefund = async (req, res) => {
       }
     }
 
-    sale.items = await db
-      .select({
-        id: saleItems.id,
-        product_id: saleItems.productId,
-        quantity: saleItems.quantity,
-        price: saleItems.price,
-        discounted_price: saleItems.discountedPrice,
-        product: { id: products.id, name: products.name },
-      })
-      .from(saleItems)
-      .leftJoin(products, eq(saleItems.productId, products.id))
-      .where(eq(saleItems.saleId, saleId));
-
-    // ── 4. Fetch already-refunded quantities for this sale ───────────────────
-    const existingRefundItems = await db
-      .select({ sale_item_id: refundItems.saleItemId, quantity: refundItems.quantity })
-      .from(refundItems)
-      .innerJoin(refunds, eq(refundItems.refundId, refunds.id))
-      .where(eq(refunds.saleId, saleId));
-
-    const alreadyRefunded = existingRefundItems.reduce((acc, ri) => {
-      acc[ri.sale_item_id] = (acc[ri.sale_item_id] || 0) + ri.quantity;
-      return acc;
-    }, {});
-
-    // ── 5. Validate each requested refund item ───────────────────────────────
-    const saleItemMap = new Map(sale.items.map((si) => [si.id, si]));
-    let calculatedTotalRefund = 0;
-    const stockUpdates = [];
-
-    for (const item of items) {
-      const saleItem = saleItemMap.get(item.saleItemId);
-      if (!saleItem) {
-        return res.status(404).json({
-          message: `SaleItem ID ${item.saleItemId} does not belong to Sale #${saleId}`,
-        });
-      }
-
-      const previouslyRefunded = alreadyRefunded[item.saleItemId] || 0;
-      const refundableQty = saleItem.quantity - previouslyRefunded;
-
-      if (item.quantity > refundableQty) {
-        return res.status(400).json({
-          message: `Cannot refund ${item.quantity} of "${saleItem.product.name}". Refundable: ${refundableQty}`,
-        });
-      }
-
-      const unitPrice = saleItem.discounted_price
-        ? Number(saleItem.discounted_price)
-        : Number(saleItem.price);
-      const refundAmount = unitPrice * item.quantity;
-
-      calculatedTotalRefund += refundAmount;
-      stockUpdates.push({
-        productId: saleItem.product_id,
-        quantity: item.quantity,
-        saleItemId: saleItem.id,
-        refundAmount,
-        unitPrice,
-      });
-    }
-
-    // ── 6. Determine new sale status ─────────────────────────────────────────
-    const totalSaleQty = sale.items.reduce((s, i) => s + i.quantity, 0);
-    const totalRefundedQty =
-      Object.values(alreadyRefunded).reduce((s, q) => s + q, 0) +
-      items.reduce((s, i) => s + i.quantity, 0);
-
-    const newSaleStatus =
-      totalRefundedQty >= totalSaleQty ? "fully_refunded" : "partially_refunded";
+    // ── 4–6 live in validateRefundItems (shared with refund requests) ────────
 
     // ── 7. Execute atomic refund via RPC ─────────────────────────────────────
     const rpcItems = stockUpdates.map((su) => ({
