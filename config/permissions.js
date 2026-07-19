@@ -58,6 +58,8 @@ const ROLE_PERMISSIONS = {
     "products.write",
     "stock.read",
     "stock.write",
+    // Read-only categories so the products page (filters + product form) loads.
+    "categories.read",
     // Switch among granted branches. The switchBranch controller still enforces
     // that the target is in the manager's allowed_branch_ids (+ home).
     "branches.switch",

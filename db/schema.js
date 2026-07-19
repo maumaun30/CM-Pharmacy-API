@@ -3,7 +3,7 @@
 // Do not hand-edit table shapes here — re-run pull and re-convert if the DB schema changes.
 // See docs/local-dev.md.
 
-const { pgTable, uniqueIndex, index, unique, bigserial, text, varchar, boolean, jsonb, timestamp, foreignKey, bigint, numeric, integer, pgEnum } = require("drizzle-orm/pg-core");
+const { pgTable, uniqueIndex, index, unique, bigserial, text, varchar, boolean, jsonb, timestamp, foreignKey, bigint, numeric, integer, pgEnum, uuid } = require("drizzle-orm/pg-core");
 const { sql } = require("drizzle-orm");
 const applicableTo = pgEnum("applicable_to", ['ALL_PRODUCTS', 'SPECIFIC_PRODUCTS', 'CATEGORIES'])
 const discountCategory = pgEnum("discount_category", ['PWD', 'SENIOR_CITIZEN', 'PROMOTIONAL', 'SEASONAL', 'OTHER'])
@@ -51,6 +51,8 @@ const sales = pgTable("sales", {
 	customerName: text("customer_name"),
 	customerIdNumber: text("customer_id_number"),
 	customerDiscountType: text("customer_discount_type"),
+	// Offline POS sync idempotency key (migration 20260719000000).
+	clientRef: uuid("client_ref").unique(),
 	// You can use { mode: "bigint" } if numbers are exceeding js number limitations
 	soldBy: bigint("sold_by", { mode: "number" }).notNull(),
 	soldAt: timestamp("sold_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),

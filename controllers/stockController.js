@@ -176,13 +176,15 @@ exports.getAllStockTransactions = async (req, res) => {
 
 exports.addStock = async (req, res) => {
   try {
-    const { productId, quantity, unitCost, batchNumber, expiryDate, supplier, transactionType = "PURCHASE" } = req.body;
+    const { productId, quantity, unitCost, sellingPrice, branchId, batchNumber, expiryDate, supplier, transactionType = "PURCHASE" } = req.body;
 
     if (!productId || !quantity || quantity <= 0) {
       return res.status(400).json({ message: "Product ID and positive quantity are required" });
     }
 
-    const { activeBranchId } = await getUserActiveBranch(req.user.id);
+    // Explicit branchId (admin in all-branches view) wins over the session branch.
+    const { activeBranchId: sessionBranchId } = await getUserActiveBranch(req.user.id);
+    const activeBranchId = branchId || sessionBranchId;
     if (!activeBranchId) {
       return res.status(400).json({ message: "User is not assigned to any branch" });
     }
@@ -219,6 +221,19 @@ exports.addStock = async (req, res) => {
       `Added ${quantity} units to product ${productId} at branch ${activeBranchId}`,
       { stock }
     );
+
+    // New cost/price supplied with the delivery updates the product master too.
+    const productUpdates = {};
+    if (unitCost != null && unitCost !== "") productUpdates.cost = parseFloat(unitCost);
+    if (sellingPrice != null && sellingPrice !== "") productUpdates.price = parseFloat(sellingPrice);
+    if (Object.keys(productUpdates).length > 0) {
+      await db.update(products).set(productUpdates).where(eq(products.id, productId));
+      await createLog(
+        req, "UPDATE", "products", productId,
+        `Updated product ${productId} pricing from stock entry`,
+        { productUpdates }
+      );
+    }
 
     invalidate("dashboard:");
     emitStockUpdate(activeBranchId, { productId, newStock: quantityAfter });

@@ -23,6 +23,9 @@ const { users, products, branchStocks, sales, saleItems, branches, discounts } =
 //      and deducts stock (which MAY go negative — overselling is allowed; the
 //      next stock-in nets it out). Products with track_inventory = false skip
 //      all branch_stocks handling (the pre-check in this controller skips them).
+// Offline sync: an optional client_ref UUID makes the call idempotent (a replay
+// of an already-synced sale returns the existing sale id without re-deducting
+// stock), and an optional sold_at records the device's real sale time.
 // Keep db/functions/create_sale.sql in sync with any changes to sale/stock logic.
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -31,6 +34,8 @@ exports.createSale = async (req, res) => {
     const {
       cart, subtotal, totalDiscount, total, cashAmount,
       customerName, customerIdNumber, customerDiscountType,
+      // Offline sync: client-generated UUID (idempotency) + device sale time.
+      clientRef, soldAt,
     } = req.body;
 
     // ── 1. Resolve user and active branch ────────────────────────────────────
@@ -151,23 +156,44 @@ exports.createSale = async (req, res) => {
 
     // ── 6. Execute atomic sale via RPC ────────────────────────────────────────
     const parsedCash = cashAmount ? parseFloat(cashAmount) : null;
-    const result = await db.execute(sql`
-      select create_sale(
-        ${req.user.id}::bigint,
-        ${activeBranchId}::bigint,
-        ${calculatedSubtotal}::numeric,
-        ${calculatedTotalDiscount}::numeric,
-        ${calculatedTotal}::numeric,
-        ${parsedCash}::numeric,
-        ${parsedCash !== null ? parsedCash - calculatedTotal : null}::numeric,
-        ${JSON.stringify(rpcItems)}::jsonb,
-        ${customerName || null}::text,
-        ${customerIdNumber || null}::text,
-        ${customerDiscountType || null}::text
-      ) as sale_id
-    `);
-    // create_sale returns bigint; node-pg yields it as a string.
-    const saleId = Number(result.rows[0].sale_id);
+    let saleId;
+    try {
+      const result = await db.execute(sql`
+        select create_sale(
+          ${req.user.id}::bigint,
+          ${activeBranchId}::bigint,
+          ${calculatedSubtotal}::numeric,
+          ${calculatedTotalDiscount}::numeric,
+          ${calculatedTotal}::numeric,
+          ${parsedCash}::numeric,
+          ${parsedCash !== null ? parsedCash - calculatedTotal : null}::numeric,
+          ${JSON.stringify(rpcItems)}::jsonb,
+          ${customerName || null}::text,
+          ${customerIdNumber || null}::text,
+          ${customerDiscountType || null}::text,
+          ${clientRef || null}::uuid,
+          ${soldAt || null}::timestamptz
+        ) as sale_id
+      `);
+      // create_sale returns bigint; node-pg yields it as a string.
+      saleId = Number(result.rows[0].sale_id);
+    } catch (rpcError) {
+      // Two concurrent replays of the same offline sale can race past the RPC's
+      // idempotency check; the sales.client_ref unique constraint catches the
+      // loser — resolve it to the winner's sale instead of failing the retry.
+      const pgErr = rpcError.cause || rpcError;
+      const isClientRefConflict =
+        clientRef && pgErr.code === "23505" &&
+        String(pgErr.constraint || "").includes("client_ref");
+      if (!isClientRefConflict) throw rpcError;
+      const [existing] = await db
+        .select({ id: sales.id })
+        .from(sales)
+        .where(eq(sales.clientRef, clientRef))
+        .limit(1);
+      if (!existing) throw rpcError;
+      saleId = existing.id;
+    }
 
     // ── 7. Audit log ──────────────────────────────────────────────────────────
     await createLog(

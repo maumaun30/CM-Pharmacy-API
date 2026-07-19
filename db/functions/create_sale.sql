@@ -6,10 +6,14 @@
 -- writes a stock ledger row. Products with track_inventory = false (services /
 -- non-stock items) skip all branch_stocks handling entirely.
 
--- Adding args changes the signature, so drop the previous 8-arg version first
--- (CREATE OR REPLACE would otherwise leave it as an ambiguous overload).
+-- Adding args changes the signature, so drop the previous versions first
+-- (CREATE OR REPLACE would otherwise leave them as ambiguous overloads).
 drop function if exists create_sale(
   bigint, bigint, numeric, numeric, numeric, numeric, numeric, jsonb
+);
+drop function if exists create_sale(
+  bigint, bigint, numeric, numeric, numeric, numeric, numeric, jsonb,
+  text, text, text
 );
 
 create or replace function create_sale(
@@ -24,7 +28,11 @@ create or replace function create_sale(
   -- [{ product_id, quantity, price, discounted_price, discount_id, discount_amount }]
   p_customer_name          text default null,
   p_customer_id_number     text default null,
-  p_customer_discount_type text default null
+  p_customer_discount_type text default null,
+  -- Offline sync: client-generated UUID makes replays idempotent, and the
+  -- device's real sale time replaces now() for queued offline sales.
+  p_client_ref  uuid        default null,
+  p_sold_at     timestamptz default null
 )
 returns bigint as $$
 declare
@@ -36,16 +44,27 @@ declare
   v_quantity      integer;
   v_tracked       boolean;
 begin
+  -- 0. Idempotency: an already-synced client_ref returns the existing sale
+  -- without touching stock again.
+  if p_client_ref is not null then
+    select id into v_sale_id from sales where client_ref = p_client_ref;
+    if v_sale_id is not null then
+      return v_sale_id;
+    end if;
+  end if;
+
   -- 1. Create sale header
   insert into sales (
     sold_by, branch_id, subtotal, total_discount,
     total_amount, cash_amount, change_amount,
-    customer_name, customer_id_number, customer_discount_type
+    customer_name, customer_id_number, customer_discount_type,
+    client_ref, sold_at
   )
   values (
     p_sold_by, p_branch_id, p_subtotal, p_discount,
     p_total, p_cash, p_change,
-    p_customer_name, p_customer_id_number, p_customer_discount_type
+    p_customer_name, p_customer_id_number, p_customer_discount_type,
+    p_client_ref, coalesce(p_sold_at, now())
   )
   returning id into v_sale_id;
 
