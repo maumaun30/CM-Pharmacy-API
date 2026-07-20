@@ -31,6 +31,27 @@ const safeUser = (user) => ({
   permissions: permissionsForRole(user.role),
 });
 
+// Short-lived token issued to a superadmin between the password (or Google)
+// check and TOTP verification. authMiddleware rejects it on every normal route;
+// only the /auth/totp/* challenge endpoints accept it.
+const signPreAuthToken = (user) =>
+  jwt.sign({ id: user.id, stage: "totp" }, process.env.JWT_SECRET, {
+    expiresIn: "5m",
+  });
+
+// Superadmin never gets a full token straight from a credential check — the
+// client is redirected into the TOTP challenge (or forced enrollment).
+const totpChallengeResponse = (user) => ({
+  ...(user.totpEnabled
+    ? { requires_totp: true }
+    : { requires_totp_setup: true }),
+  preAuthToken: signPreAuthToken(user),
+});
+
+// Shared with totpController (which issues the full token after the challenge).
+exports.signToken = signToken;
+exports.safeUser = safeUser;
+
 // ─── Register ────────────────────────────────────────────────────────────────
 
 exports.register = async (req, res) => {
@@ -104,6 +125,7 @@ exports.login = async (req, res) => {
         role: users.role,
         password: users.password,
         isActive: users.isActive,
+        totpEnabled: users.totpEnabled,
       })
       .from(users)
       .where(eq(users.username, username))
@@ -120,6 +142,11 @@ exports.login = async (req, res) => {
       return res
         .status(401)
         .json({ message: "Account is inactive. Contact administrator." });
+    }
+
+    // Superadmin owes a TOTP code (or forced enrollment) before a full token.
+    if (user.role === "superadmin") {
+      return res.status(200).json(totpChallengeResponse(user));
     }
 
     const token = signToken(user);
@@ -475,6 +502,7 @@ exports.googleLogin = async (req, res) => {
         email: users.email,
         role: users.role,
         isActive: users.isActive,
+        totpEnabled: users.totpEnabled,
       })
       .from(users)
       .where(eq(users.googleSub, payload.sub))
@@ -491,6 +519,11 @@ exports.googleLogin = async (req, res) => {
       return res
         .status(401)
         .json({ message: "Account is inactive. Contact administrator." });
+    }
+
+    // Google identity alone is not enough for superadmin — same TOTP challenge.
+    if (user.role === "superadmin") {
+      return res.status(200).json(totpChallengeResponse(user));
     }
 
     const token = signToken(user);

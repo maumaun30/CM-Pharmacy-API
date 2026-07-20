@@ -19,6 +19,13 @@ exports.authenticateUser = async (req, res, next) => {
     const token = authHeader.split(" ")[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
 
+    // Pre-auth tokens (issued mid-login while a superadmin still owes a TOTP
+    // code) are only valid on the /auth/totp/* verification endpoints — never
+    // here. See authenticateTotpStage below.
+    if (decoded.stage === "totp") {
+      return res.status(401).json({ message: "Invalid or expired token" });
+    }
+
     // Two aliased self-joins to branches: home branch + active (current) branch.
     const homeBranch = alias(branches, "home_branch");
     const curBranch = alias(branches, "cur_branch");
@@ -65,6 +72,51 @@ exports.authenticateUser = async (req, res, next) => {
       currentBranch:   user.currentBranch?.id ? user.currentBranch : null,
     };
 
+    next();
+  } catch (error) {
+    if (error.name === "JsonWebTokenError" || error.name === "TokenExpiredError") {
+      return res.status(401).json({ message: "Invalid or expired token" });
+    }
+    return res.status(500).json({ message: "Server error", error: error.message });
+  }
+};
+
+// ─── TOTP pre-auth stage ──────────────────────────────────────────────────────
+// Accepts ONLY the short-lived pre-auth token issued after a superadmin's
+// password (or Google) check succeeds but before the TOTP code is verified.
+// Grants access to nothing except the /auth/totp/* challenge endpoints.
+exports.authenticateTotpStage = async (req, res, next) => {
+  try {
+    const authHeader = req.headers.authorization;
+    if (!authHeader || !authHeader.startsWith("Bearer ")) {
+      return res.status(401).json({ message: "No token provided, authorization denied" });
+    }
+
+    const decoded = jwt.verify(authHeader.split(" ")[1], process.env.JWT_SECRET);
+    if (decoded.stage !== "totp") {
+      return res.status(401).json({ message: "Invalid or expired token" });
+    }
+
+    const [user] = await db
+      .select({
+        id: users.id,
+        username: users.username,
+        email: users.email,
+        role: users.role,
+        isActive: users.isActive,
+        totpSecret: users.totpSecret,
+        totpEnabled: users.totpEnabled,
+        totpBackupCodes: users.totpBackupCodes,
+      })
+      .from(users)
+      .where(eq(users.id, decoded.id))
+      .limit(1);
+
+    if (!user || !user.isActive || user.role !== "superadmin") {
+      return res.status(401).json({ message: "Invalid or expired token" });
+    }
+
+    req.totpUser = user;
     next();
   } catch (error) {
     if (error.name === "JsonWebTokenError" || error.name === "TokenExpiredError") {

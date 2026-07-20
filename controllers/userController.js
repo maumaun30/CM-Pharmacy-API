@@ -10,6 +10,24 @@ const { users } = schema;
 // Staff are expected to change it after first login.
 const DEFAULT_PASSWORD = "staff123";
 
+// Guards for mutations on privileged accounts
+// (spec: docs/superpowers/specs/2026-07-17-superadmin-totp-design.md):
+//   - the superadmin account is untouchable by anyone but itself
+//   - accounts holding the admin role require users.manage_admins (superadmin-only)
+// Returns an error message, or null when the mutation may proceed.
+const guardTargetUser = (req, target) => {
+  if (target.role === "superadmin" && req.user.id !== target.id) {
+    return "The superadmin account can only be modified by the superadmin";
+  }
+  if (
+    target.role === "admin" &&
+    !req.user.permissions.includes("users.manage_admins")
+  ) {
+    return "Only the superadmin can manage admin accounts";
+  }
+  return null;
+};
+
 // ─── Get All Users ────────────────────────────────────────────────────────────
 
 exports.getAllUsers = async (req, res) => {
@@ -55,6 +73,15 @@ exports.createUser = async (req, res) => {
         message:
           "Missing required fields: username, email, role and status are required",
       });
+    }
+
+    // Superadmin is never assignable through the API (DB-script promotion only;
+    // the users_one_superadmin unique index is the backstop).
+    if (role === "superadmin") {
+      return res.status(400).json({ message: "The superadmin role cannot be assigned" });
+    }
+    if (role === "admin" && !req.user.permissions.includes("users.manage_admins")) {
+      return res.status(403).json({ message: "Only the superadmin can create admin accounts" });
     }
 
     const [existingEmail] = await db
@@ -131,12 +158,15 @@ exports.resetPassword = async (req, res) => {
     const userId = req.params.id;
 
     const [user] = await db
-      .select({ id: users.id, username: users.username })
+      .select({ id: users.id, username: users.username, role: users.role })
       .from(users)
       .where(eq(users.id, userId))
       .limit(1);
 
     if (!user) return res.status(404).json({ message: "User not found" });
+
+    const guardError = guardTargetUser(req, user);
+    if (guardError) return res.status(403).json({ message: guardError });
 
     const hashedPassword = await bcrypt.hash(DEFAULT_PASSWORD, 10);
     await db.update(users).set({ password: hashedPassword }).where(eq(users.id, userId));
@@ -163,7 +193,7 @@ exports.deleteUser = async (req, res) => {
     const userId = req.params.id;
 
     const [user] = await db
-      .select({ id: users.id, username: users.username })
+      .select({ id: users.id, username: users.username, role: users.role })
       .from(users)
       .where(eq(users.id, userId))
       .limit(1);
@@ -175,6 +205,11 @@ exports.deleteUser = async (req, res) => {
         .status(400)
         .json({ message: "You cannot delete your own account" });
     }
+
+    // Self-delete is already rejected above, so this blocks EVERYONE from
+    // deleting the superadmin, and non-superadmins from deleting admins.
+    const guardError = guardTargetUser(req, user);
+    if (guardError) return res.status(403).json({ message: guardError });
 
     await db.delete(users).where(eq(users.id, userId));
 
@@ -220,6 +255,27 @@ exports.updateUser = async (req, res) => {
       .limit(1);
 
     if (!user) return res.status(404).json({ message: "User not found" });
+
+    const guardError = guardTargetUser(req, user);
+    if (guardError) return res.status(403).json({ message: guardError });
+
+    // Promotion to superadmin is DB-script only; promotion to admin is a
+    // superadmin-exclusive action.
+    if (role === "superadmin" && user.role !== "superadmin") {
+      return res.status(400).json({ message: "The superadmin role cannot be assigned" });
+    }
+    if (
+      role === "admin" &&
+      user.role !== "admin" &&
+      !req.user.permissions.includes("users.manage_admins")
+    ) {
+      return res.status(403).json({ message: "Only the superadmin can create admin accounts" });
+    }
+    // The superadmin cannot demote itself through the API (avoids stranding the
+    // system with no superadmin by accident; use the DB script deliberately).
+    if (user.role === "superadmin" && role !== undefined && role !== "superadmin") {
+      return res.status(400).json({ message: "The superadmin role cannot be changed here" });
+    }
 
     if (email && email !== user.email) {
       const [taken] = await db

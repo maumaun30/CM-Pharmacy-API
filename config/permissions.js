@@ -10,7 +10,7 @@
 //   "resource.*" → every action on that resource
 // ─────────────────────────────────────────────────────────────────────────────
 
-const ROLES = ["admin", "manager", "cashier"];
+const ROLES = ["superadmin", "admin", "manager", "cashier"];
 
 // The full catalogue of concrete permissions in the system. Wildcards in
 // ROLE_PERMISSIONS are expanded against this list, and the Roles & Permissions
@@ -37,12 +37,20 @@ const ALL_PERMISSIONS = [
   "branches.switch",
   "users.read",
   "users.write",
+  // Create/edit/deactivate/delete accounts holding the admin role. Held ONLY by
+  // superadmin — this is what separates the two roles.
+  "users.manage_admins",
   "logs.read",
 ];
 
 const ROLE_PERMISSIONS = {
-  // Full access to everything.
-  admin: ["*"],
+  // The one absolute account (DB-enforced single holder, mandatory TOTP 2FA on
+  // the web UI). Full access to everything, including admin account management.
+  superadmin: ["*"],
+
+  // Full access to everything EXCEPT managing admin accounts — that is
+  // superadmin-exclusive.
+  admin: ALL_PERMISSIONS.filter((p) => p !== "users.manage_admins"),
 
   // Runs a branch: full product + inventory control, and can read sales.
   // Intentionally NOT granted: categories, discounts, users, branches, logs.

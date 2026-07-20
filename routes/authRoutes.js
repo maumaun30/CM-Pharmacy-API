@@ -1,9 +1,12 @@
 const express = require("express");
 const router = express.Router();
 const authController = require("../controllers/authController");
+const totpController = require("../controllers/totpController");
 const {
   authenticateUser,
+  authenticateTotpStage,
   requirePermission,
+  authorizeRoles,
 } = require("../middleware/authMiddleware");
 
 // Public routes
@@ -35,6 +38,18 @@ router.get(
 // PIN is a manager-override credential (e.g. refund approval), not a login
 // method — the old /login-pin endpoint was removed with the login page's PIN mode.
 router.put("/pin", authenticateUser, authController.setPin);
+
+// TOTP 2FA challenge (superadmin only). The first three accept ONLY the
+// 5-minute pre-auth token issued by login; regeneration needs a full token.
+router.post("/totp/setup", authenticateTotpStage, totpController.setup);
+router.post("/totp/verify-setup", authenticateTotpStage, totpController.verifySetup);
+router.post("/totp/verify", authenticateTotpStage, totpController.verify);
+router.post(
+  "/totp/backup-codes/regenerate",
+  authenticateUser,
+  authorizeRoles("superadmin"),
+  totpController.regenerateBackupCodes,
+);
 
 // Google account linking (web + mobile share these endpoints).
 router.post("/google", authController.googleLogin);                       // public

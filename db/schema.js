@@ -132,6 +132,11 @@ const users = pgTable("users", {
 	googleSub: text("google_sub"),
 	googleEmail: text("google_email"),
 	googleLinkedAt: timestamp("google_linked_at", { withTimezone: true, mode: 'string' }),
+	// TOTP 2FA (superadmin only). Secret is base32; backup codes are bcrypt
+	// hashes of unused one-time codes.
+	totpSecret: text("totp_secret"),
+	totpEnabled: boolean("totp_enabled").default(false).notNull(),
+	totpBackupCodes: jsonb("totp_backup_codes"),
 	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow(),
 	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow(),
 }, (table) => [
