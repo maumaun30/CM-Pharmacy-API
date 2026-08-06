@@ -253,7 +253,7 @@ exports.addStock = async (req, res) => {
 
 exports.adjustStock = async (req, res) => {
   try {
-    const { productId, quantity, reason } = req.body;
+    const { productId, quantity, reason, unitCost, sellingPrice } = req.body;
 
     if (!productId || !quantity || !reason) {
       return res.status(400).json({ message: "Product ID, quantity, and reason are required" });
@@ -283,6 +283,10 @@ exports.adjustStock = async (req, res) => {
       quantity: parseInt(quantity),
       quantityBefore,
       quantityAfter,
+      // The adjustment quantity is signed, so total_cost is signed too: a
+      // deduction records the value taken off the shelf as a negative.
+      unitCost: unitCost != null && unitCost !== "" ? parseFloat(unitCost) : null,
+      totalCost: unitCost != null && unitCost !== "" ? parseFloat(unitCost) * parseInt(quantity) : null,
       reason: reason || null,
       performedBy: req.user.id,
     });
@@ -292,6 +296,20 @@ exports.adjustStock = async (req, res) => {
       `Adjusted stock for product ${productId}: ${quantity > 0 ? "+" : ""}${quantity} at branch ${activeBranchId}`,
       { stock, reason }
     );
+
+    // Same rule as addStock: cost/price supplied alongside the movement also
+    // updates the product master, so a recount can correct pricing in one pass.
+    const productUpdates = {};
+    if (unitCost != null && unitCost !== "") productUpdates.cost = parseFloat(unitCost);
+    if (sellingPrice != null && sellingPrice !== "") productUpdates.price = parseFloat(sellingPrice);
+    if (Object.keys(productUpdates).length > 0) {
+      await db.update(products).set(productUpdates).where(eq(products.id, productId));
+      await createLog(
+        req, "UPDATE", "products", productId,
+        `Updated product ${productId} pricing from stock adjustment`,
+        { productUpdates }
+      );
+    }
 
     invalidate("dashboard:");
     emitStockUpdate(activeBranchId, { productId, newStock: quantityAfter });
