@@ -222,15 +222,17 @@ exports.addStock = async (req, res) => {
       { stock }
     );
 
-    // New cost/price supplied with the delivery updates the product master too.
+    // New cost/price/expiry supplied with the delivery updates the product master too
+    // (products only track a single expiry_date, not per-batch — the newest delivery wins).
     const productUpdates = {};
     if (unitCost != null && unitCost !== "") productUpdates.cost = parseFloat(unitCost);
     if (sellingPrice != null && sellingPrice !== "") productUpdates.price = parseFloat(sellingPrice);
+    if (expiryDate) productUpdates.expiryDate = new Date(expiryDate).toISOString();
     if (Object.keys(productUpdates).length > 0) {
       await db.update(products).set(productUpdates).where(eq(products.id, productId));
       await createLog(
         req, "UPDATE", "products", productId,
-        `Updated product ${productId} pricing from stock entry`,
+        `Updated product ${productId} pricing/expiry from stock entry`,
         { productUpdates }
       );
     }
