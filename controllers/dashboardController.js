@@ -3,7 +3,7 @@ const { and, eq, gte, lt, lte, desc, asc, count, sql } = require("drizzle-orm");
 const { db, schema } = require("../config/db");
 const { getCached } = require("../utils/cache");
 
-const { sales, branchStocks, products, users, branches } = schema;
+const { sales, saleItems, categories, branchStocks, products, users, branches } = schema;
 
 const TTL_SHORT  = 60_000;       // 1 min  — today's sales, stock alerts
 const TTL_MEDIUM = 2 * 60_000;   // 2 min  — sales trend chart
@@ -313,39 +313,40 @@ exports.getSalesTrend = async (req, res) => {
     const activeBranchId = getActiveBranchId(req.user);
     const mode   = req.query.mode   || "daily";
     const offset = parseInt(req.query.offset ?? "0", 10);
-    const cacheKey = `dashboard:trend:${activeBranchId ?? "all"}:${mode}:${offset}`;
+    const { start, end } = req.query;
+
+    if (mode === "custom" && !(dayjs(start).isValid() && dayjs(end).isValid())) {
+      return res.status(400).json({ message: "mode=custom requires valid start and end dates" });
+    }
+
+    const cacheKey = `dashboard:trend:${activeBranchId ?? "all"}:${mode}:${offset}:${start ?? ""}:${end ?? ""}`;
 
     const result = await getCached(cacheKey, TTL_MEDIUM, async () => {
-      let rangeStart, rangeEnd;
-      if (mode === "daily") {
-        rangeStart = dayjs().add(offset, "day").startOf("day");
-        rangeEnd   = dayjs().add(offset, "day").endOf("day");
-      } else if (mode === "weekly") {
-        rangeStart = dayjs().add(offset, "week").startOf("week");
-        rangeEnd   = dayjs().add(offset, "week").endOf("week");
-      } else if (mode === "monthly") {
-        rangeStart = dayjs().add(offset, "month").startOf("month");
-        rangeEnd   = dayjs().add(offset, "month").endOf("month");
-      } else {
-        // annual
-        rangeStart = dayjs().add(offset, "year").startOf("year");
-        rangeEnd   = dayjs().add(offset, "year").endOf("year");
-      }
+      const { rangeStart, rangeEnd } = resolveRange(mode, offset, start, end);
+      const bucketMode = pickBucketMode(mode, rangeStart, rangeEnd);
 
-      const conds = [gte(sales.soldAt, rangeStart.toISOString()), lte(sales.soldAt, rangeEnd.toISOString())];
-      if (activeBranchId) conds.push(eq(sales.branchId, activeBranchId));
+      // The previous comparable window, used for the period-over-period deltas.
+      // Calendar modes step back one whole unit (so February compares against
+      // January, not against "the last 28 days"); a custom range shifts back by
+      // its own span.
+      const prev =
+        mode === "custom"
+          ? (() => {
+              const spanMs = rangeEnd.valueOf() - rangeStart.valueOf();
+              return { rangeStart: dayjs(rangeStart.valueOf() - spanMs - 1), rangeEnd: dayjs(rangeStart.valueOf() - 1) };
+            })()
+          : resolveRange(mode, offset - 1);
 
-      const rows = await db
-        .select({ id: sales.id, total_amount: sales.totalAmount, sold_at: sales.soldAt })
-        .from(sales)
-        .where(and(...conds))
-        .orderBy(asc(sales.soldAt));
+      const [rows, prevRows] = await Promise.all([
+        selectSalesInRange(activeBranchId, rangeStart, rangeEnd),
+        selectSalesInRange(activeBranchId, prev.rangeStart, prev.rangeEnd),
+      ]);
 
-      const points = buildSkeleton(mode, rangeStart);
+      const points = buildSkeleton(mode, bucketMode, rangeStart, rangeEnd);
       let totalSales = 0, totalTransactions = 0;
 
       for (const sale of rows) {
-        const key   = getDateKey(sale.sold_at, mode);
+        const key   = getDateKey(sale.sold_at, bucketMode);
         const point = points.find((p) => p.dateKey === key);
         if (point) {
           point.sales        += parseFloat(sale.total_amount);
@@ -355,7 +356,23 @@ exports.getSalesTrend = async (req, res) => {
         totalTransactions += 1;
       }
 
-      return { points, totalSales, totalTransactions };
+      const previousSales = prevRows.reduce((sum, s) => sum + parseFloat(s.total_amount), 0);
+
+      return {
+        points,
+        totalSales,
+        totalTransactions,
+        // Added for the mobile admin's period summary; existing consumers ignore it.
+        bucketMode,
+        rangeStart: rangeStart.toISOString(),
+        rangeEnd:   rangeEnd.toISOString(),
+        previous: {
+          totalSales: previousSales,
+          totalTransactions: prevRows.length,
+          rangeStart: prev.rangeStart.toISOString(),
+          rangeEnd:   prev.rangeEnd.toISOString(),
+        },
+      };
     });
 
     return res.json(result);
@@ -365,41 +382,138 @@ exports.getSalesTrend = async (req, res) => {
   }
 };
 
+// ─── Get Sales By Category (period-aware) ─────────────────────────────────────
+
+exports.getSalesByCategory = async (req, res) => {
+  try {
+    const activeBranchId = getActiveBranchId(req.user);
+    const mode   = req.query.mode   || "monthly";
+    const offset = parseInt(req.query.offset ?? "0", 10);
+    const { start, end } = req.query;
+
+    if (mode === "custom" && !(dayjs(start).isValid() && dayjs(end).isValid())) {
+      return res.status(400).json({ message: "mode=custom requires valid start and end dates" });
+    }
+
+    const cacheKey = `dashboard:by-category:${activeBranchId ?? "all"}:${mode}:${offset}:${start ?? ""}:${end ?? ""}`;
+
+    const result = await getCached(cacheKey, TTL_MEDIUM, async () => {
+      const { rangeStart, rangeEnd } = resolveRange(mode, offset, start, end);
+
+      const conds = [
+        gte(sales.soldAt, rangeStart.toISOString()),
+        lte(sales.soldAt, rangeEnd.toISOString()),
+      ];
+      if (activeBranchId) conds.push(eq(sales.branchId, activeBranchId));
+
+      // Revenue is net of line discounts (discounted_price is a UNIT price), so
+      // these totals reconcile with the period's net sales. Note get_top_products
+      // deliberately reports GROSS (quantity * price) — don't cross-compare them.
+      const rows = await db
+        .select({
+          category_id:   categories.id,
+          category_name: categories.name,
+          revenue:       sql`sum(${saleItems.quantity} * coalesce(${saleItems.discountedPrice}, ${saleItems.price}))`,
+          quantity:      sql`sum(${saleItems.quantity})`,
+          sale_count:    sql`count(distinct ${saleItems.saleId})`,
+        })
+        .from(saleItems)
+        .innerJoin(sales, eq(saleItems.saleId, sales.id))
+        .leftJoin(products, eq(saleItems.productId, products.id))
+        .leftJoin(categories, eq(products.categoryId, categories.id))
+        .where(and(...conds))
+        .groupBy(categories.id, categories.name);
+
+      return rows
+        .map((r) => ({
+          // A product with no category still sold something; bucket it rather
+          // than dropping the revenue silently.
+          id:            r.category_id == null ? null : Number(r.category_id),
+          name:          r.category_name ?? "Uncategorized",
+          totalRevenue:  parseFloat(r.revenue) || 0,
+          totalQuantity: parseInt(r.quantity, 10) || 0,
+          numberOfSales: parseInt(r.sale_count, 10) || 0,
+        }))
+        .sort((a, b) => b.totalRevenue - a.totalRevenue);
+    });
+
+    return res.json(result);
+  } catch (error) {
+    console.error("Sales by category error:", error);
+    return res.status(500).json({ message: "Error fetching sales by category", error: error.message });
+  }
+};
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-function getDateKey(soldAt, mode) {
+function selectSalesInRange(activeBranchId, rangeStart, rangeEnd) {
+  const conds = [gte(sales.soldAt, rangeStart.toISOString()), lte(sales.soldAt, rangeEnd.toISOString())];
+  if (activeBranchId) conds.push(eq(sales.branchId, activeBranchId));
+  return db
+    .select({ id: sales.id, total_amount: sales.totalAmount, sold_at: sales.soldAt })
+    .from(sales)
+    .where(and(...conds))
+    .orderBy(asc(sales.soldAt));
+}
+
+function resolveRange(mode, offset, start, end) {
+  if (mode === "custom") {
+    return { rangeStart: dayjs(start).startOf("day"), rangeEnd: dayjs(end).endOf("day") };
+  }
+  const unit = mode === "daily" ? "day" : mode === "weekly" ? "week" : mode === "monthly" ? "month" : "year";
+  const anchor = dayjs().add(offset, unit);
+  return { rangeStart: anchor.startOf(unit), rangeEnd: anchor.endOf(unit) };
+}
+
+// A custom range has no fixed granularity, so pick one that keeps the bar count
+// readable on a phone: a single day is hourly, up to ~2 months is daily, and
+// anything longer collapses to months.
+function pickBucketMode(mode, rangeStart, rangeEnd) {
+  if (mode === "daily")  return "hour";
+  if (mode === "annual") return "month";
+  if (mode === "weekly" || mode === "monthly") return "day";
+  const days = rangeEnd.diff(rangeStart, "day");
+  if (days <= 1)  return "hour";
+  if (days <= 62) return "day";
+  return "month";
+}
+
+function getDateKey(soldAt, bucketMode) {
   const d = dayjs(soldAt);
-  if (mode === "daily")  return d.format("HH");
-  if (mode === "annual") return d.format("YYYY-MM");
+  if (bucketMode === "hour")  return d.format("HH");
+  if (bucketMode === "month") return d.format("YYYY-MM");
   return d.format("YYYY-MM-DD");
 }
 
-function buildSkeleton(mode, rangeStart) {
+function buildSkeleton(mode, bucketMode, rangeStart, rangeEnd) {
   const points = [];
 
-  if (mode === "daily") {
+  if (bucketMode === "hour") {
     for (let h = 0; h < 24; h++) {
       const hour = String(h).padStart(2, "0");
       points.push({ label: dayjs(rangeStart).hour(h).format("h A"), dateKey: hour, sales: 0, transactions: 0 });
     }
-  } else if (mode === "weekly") {
-    for (let d = 0; d < 7; d++) {
-      const day = dayjs(rangeStart).add(d, "day");
-      points.push({ label: day.format("ddd"), dateKey: day.format("YYYY-MM-DD"), sales: 0, transactions: 0 });
-    }
-  } else if (mode === "monthly") {
-    const daysInMonth = dayjs(rangeStart).daysInMonth();
-    for (let d = 0; d < daysInMonth; d++) {
-      const day = dayjs(rangeStart).add(d, "day");
-      points.push({ label: day.format("D"), dateKey: day.format("YYYY-MM-DD"), sales: 0, transactions: 0 });
-    }
-  } else {
-    // annual — 12 monthly buckets
-    for (let m = 0; m < 12; m++) {
-      const month = dayjs(rangeStart).add(m, "month");
-      points.push({ label: month.format("MMM"), dateKey: month.format("YYYY-MM"), sales: 0, transactions: 0 });
-    }
+    return points;
   }
 
+  if (bucketMode === "month") {
+    // Annual keeps its bare "MMM"; a multi-year custom range needs the year too.
+    const fmt = mode === "annual" ? "MMM" : "MMM YY";
+    let cur = dayjs(rangeStart).startOf("month");
+    while (cur.isBefore(rangeEnd)) {
+      points.push({ label: cur.format(fmt), dateKey: cur.format("YYYY-MM"), sales: 0, transactions: 0 });
+      cur = cur.add(1, "month");
+    }
+    return points;
+  }
+
+  // Daily buckets. Labels stay mode-specific so existing consumers of
+  // weekly ("Mon") and monthly ("1".."31") see exactly what they did before.
+  const fmt = mode === "weekly" ? "ddd" : mode === "monthly" ? "D" : "MMM D";
+  let cur = dayjs(rangeStart).startOf("day");
+  while (cur.isBefore(rangeEnd)) {
+    points.push({ label: cur.format(fmt), dateKey: cur.format("YYYY-MM-DD"), sales: 0, transactions: 0 });
+    cur = cur.add(1, "day");
+  }
   return points;
 }

@@ -1,4 +1,5 @@
-const { and, eq, inArray, desc, sql } = require("drizzle-orm");
+const dayjs = require("dayjs");
+const { and, eq, gte, lte, inArray, desc, sql } = require("drizzle-orm");
 const { db, schema } = require("../config/db");
 const { createLog } = require("../middleware/logMiddleware");
 const { dbErrorMessage } = require("../utils/dbError");
@@ -322,6 +323,21 @@ exports.getSales = async (req, res) => {
     if (user.role !== "admin") conds.push(eq(sales.branchId, activeBranchId));
     else if (user.current_branch_id) conds.push(eq(sales.branchId, user.current_branch_id));
     // admin with no current_branch_id → no filter, sees all.
+
+    // Optional period filter. Both params are inclusive and accept an ISO
+    // timestamp or a bare YYYY-MM-DD; a bare date is widened to the whole local
+    // day so ?startDate=2026-08-06&endDate=2026-08-06 returns that full day.
+    // Omitting them keeps the historic "everything" behaviour for old clients.
+    const { startDate, endDate } = req.query;
+    const bareDate = (v) => /^\d{4}-\d{2}-\d{2}$/.test(String(v));
+    if (startDate && dayjs(startDate).isValid()) {
+      const from = bareDate(startDate) ? dayjs(startDate).startOf("day") : dayjs(startDate);
+      conds.push(gte(sales.soldAt, from.toISOString()));
+    }
+    if (endDate && dayjs(endDate).isValid()) {
+      const to = bareDate(endDate) ? dayjs(endDate).endOf("day") : dayjs(endDate);
+      conds.push(lte(sales.soldAt, to.toISOString()));
+    }
 
     const saleRows = await db
       .select({
