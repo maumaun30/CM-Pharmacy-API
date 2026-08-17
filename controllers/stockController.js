@@ -253,13 +253,17 @@ exports.addStock = async (req, res) => {
 
 exports.adjustStock = async (req, res) => {
   try {
-    const { productId, quantity, reason, unitCost, sellingPrice } = req.body;
+    const { productId, quantity, reason, unitCost, sellingPrice, branchId } = req.body;
 
     if (!productId || !quantity || !reason) {
       return res.status(400).json({ message: "Product ID, quantity, and reason are required" });
     }
 
-    const { activeBranchId } = await getUserActiveBranch(req.user.id);
+    // Explicit branchId (admin in all-branches view) wins over the session
+    // branch — same rule as addStock. Without it an admin picking a branch in
+    // the UI would silently adjust whichever branch their session sits on.
+    const { activeBranchId: sessionBranchId } = await getUserActiveBranch(req.user.id);
+    const activeBranchId = branchId || sessionBranchId;
     if (!activeBranchId) {
       return res.status(400).json({ message: "User is not assigned to any branch" });
     }
