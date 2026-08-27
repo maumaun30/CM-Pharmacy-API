@@ -8,6 +8,11 @@
 # Both hostnames route to the same API container. cm-api.devmau.site is kept
 # during the maunpharmacy.com migration; remove it once all clients cut over.
 cm-api.devmau.site, api.maunpharmacy.com {
+	# Compress at the edge instead of in Express. zstd is preferred when the
+	# client advertises it (better ratio than gzip on JSON), gzip is the
+	# fallback. Caddy skips already-encoded responses and WebSocket frames.
+	encode zstd gzip
+
 	# Proxy all traffic (including Socket.IO WebSocket upgrades) to the API
 	# container on the internal Docker network. Caddy handles WS transparently.
 	reverse_proxy api:5000

@@ -33,5 +33,10 @@ jobs:
             git reset --hard origin/feat/drizzle-rds-migration
             # Rebuild + restart only what changed; DB and Caddy keep running.
             docker compose -f docker-compose.prod.yml up -d --build
+            # The Caddyfile is bind-mounted, so Compose does NOT restart Caddy
+            # when only its contents change -- Caddy would keep serving the old
+            # config. Reload it explicitly. `reload` is graceful: no dropped
+            # connections, so live Socket.IO clients survive it.
+            docker compose -f docker-compose.prod.yml exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile
             # Reclaim space from the previous image build.
             docker image prune -f

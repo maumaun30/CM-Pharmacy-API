@@ -4,7 +4,6 @@ require("dotenv").config();
 const express = require("express");
 const http = require("http");
 const cors = require("cors");
-const compression = require("compression");
 const helmet = require("helmet");
 const rateLimit = require("express-rate-limit");
 const { corsOrigin } = require("./config/cors");
@@ -39,10 +38,27 @@ app.use(
     credentials: true,
   })
 );
-app.use(compression());
+// NOTE: response compression is done at the edge by Caddy (`encode zstd gzip` in
+// Caddyfile), not here. Caddy compresses in Go, off the Node event loop, and can
+// serve zstd -- which beats gzip on JSON. Deploy the Caddyfile + reload Caddy in
+// the same step as this app, or responses go out uncompressed.
 // Cap request body size to blunt oversized-payload abuse (default was 100kb).
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: true, limit: "1mb" }));
+
+// Global floor so one runaway client (retry loop, stuck poll) can't saturate the
+// droplet. Generous on purpose: a whole branch shares one public IP behind NAT,
+// so this must sit far above normal traffic for several tablets + the web app.
+// Socket.IO lives on /socket.io, so live updates are unaffected.
+const apiLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 600,
+  message: { message: "Too many requests. Slow down and try again shortly." },
+  standardHeaders: true,
+  legacyHeaders: false,
+});
+
+app.use("/api", apiLimiter);
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes

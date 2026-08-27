@@ -5,11 +5,16 @@ const {
   authenticateUser,
   requirePermission,
 } = require("../middleware/authMiddleware");
+const { cacheFor } = require("../middleware/cacheControl");
 
 router.use(authenticateUser);
 
-router.get("/", requirePermission("categories.read"), categoryController.getAllCategories);
-router.get("/:id", requirePermission("categories.read"), categoryController.getCategoryById);
+// Categories change rarely; let the client's HTTP cache answer repeat reads.
+// 30s is short enough that a just-created category shows up on the next screen.
+const cacheCategories = cacheFor(30);
+
+router.get("/", cacheCategories, requirePermission("categories.read"), categoryController.getAllCategories);
+router.get("/:id", cacheCategories, requirePermission("categories.read"), categoryController.getCategoryById);
 router.post("/", requirePermission("categories.write"), categoryController.createCategory);
 router.put("/:id", requirePermission("categories.write"), categoryController.updateCategory);
 router.delete(

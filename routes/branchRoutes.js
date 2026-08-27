@@ -6,12 +6,17 @@ const {
   authenticateUser,
   requirePermission,
 } = require("../middleware/authMiddleware");
+const { cacheFor } = require("../middleware/cacheControl");
 
 router.use(authenticateUser);
 
+// The branch list is near-static and is fetched on nearly every app boot.
+// NOTE: /:id/stats is deliberately NOT cached -- those numbers move per sale.
+const cacheBranches = cacheFor(30);
+
 // Public routes (authenticated users can view)
-router.get("/", branchController.getAllBranches);
-router.get("/:id", branchController.getBranchById);
+router.get("/", cacheBranches, branchController.getAllBranches);
+router.get("/:id", cacheBranches, branchController.getBranchById);
 
 // Management routes
 router.get(
