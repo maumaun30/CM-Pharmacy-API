@@ -5,6 +5,7 @@ process.env.TZ = process.env.TZ || "Asia/Manila";
 
 const app = require("./app");
 const { pool } = require("./config/db");
+const { startAutoClockOutJob } = require("./jobs/autoClockOut");
 
 const PORT = process.env.PORT || 3000;
 
@@ -28,6 +29,11 @@ const startServer = async () => {
     console.log(`Server is running on port ${PORT}`);
     console.log(`Socket.IO initialized`);
   });
+
+  // Close shifts nobody clocked out of, per each branch's auto_clock_out_at
+  // rule. Runs once now (to catch anything left open while the API was down),
+  // then on an interval. Set DISABLE_AUTO_CLOCK_OUT=true to turn it off.
+  startAutoClockOutJob();
 };
 
 startServer();
