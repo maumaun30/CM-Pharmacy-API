@@ -257,6 +257,41 @@ const emitNotificationNew = (userId, notification) => {
   }
 };
 
+/**
+ * Emit a clock in/out/break event to the branch room (and admins).
+ * Drives the console's live "On shift now" list without polling.
+ * @param {number} branchId - Branch the shift belongs to
+ * @param {object} payload - { action, entry } with a snake_case entry row
+ */
+const emitTimeClock = (branchId, payload) => {
+  try {
+    const io = getIO();
+    if (branchId) {
+      io.to(`branch-${branchId}`).emit("time:clock", payload);
+    }
+    io.to("admin-all").emit("time:clock", payload);
+  } catch (error) {
+    console.error("Error emitting time:clock:", error);
+  }
+};
+
+/**
+ * Emit an approval or edit so other reviewers' tables update in place.
+ * @param {number} branchId - Branch the entry belongs to
+ * @param {object} payload - { action, entries } with snake_case entry rows
+ */
+const emitTimeEntryUpdated = (branchId, payload) => {
+  try {
+    const io = getIO();
+    if (branchId) {
+      io.to(`branch-${branchId}`).emit("time:entry-updated", payload);
+    }
+    io.to("admin-all").emit("time:entry-updated", payload);
+  } catch (error) {
+    console.error("Error emitting time:entry-updated:", error);
+  }
+};
+
 module.exports = {
   initializeSocket,
   getIO,
@@ -267,4 +302,6 @@ module.exports = {
   emitRefundRequestNew,
   emitRefundRequestResolved,
   emitNotificationNew,
+  emitTimeClock,
+  emitTimeEntryUpdated,
 };

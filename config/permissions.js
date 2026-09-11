@@ -41,6 +41,21 @@ const ALL_PERMISSIONS = [
   // superadmin — this is what separates the two roles.
   "users.manage_admins",
   "logs.read",
+  // ── Time tracking ──────────────────────────────────────────────────────────
+  // Clock self in/out from the mobile app.
+  "time.clock",
+  // See own timesheets.
+  "time.view_own",
+  // See every staff member's entries + the branch overview (web console).
+  "time.view_all",
+  // Approve / edit entries.
+  "time.approve",
+  // Edit clock-in rules, access points and pay rules for own branch.
+  "time.settings",
+  // See the labour-cost figure on console KPI cards.
+  "time.view_cost",
+  // All branches, users & roles, integrations, audit log.
+  "time.admin",
 ];
 
 const ROLE_PERMISSIONS = {
@@ -71,6 +86,14 @@ const ROLE_PERMISSIONS = {
     // Switch among granted branches. The switchBranch controller still enforces
     // that the target is in the manager's allowed_branch_ids (+ home).
     "branches.switch",
+    // Runs the branch's timesheets: clocks in like anyone else, and supervises
+    // everyone at their branch. NOT time.admin — that is cross-branch.
+    "time.clock",
+    "time.view_own",
+    "time.view_all",
+    "time.approve",
+    "time.settings",
+    "time.view_cost",
   ],
 
   // Front-of-house: sell at the POS and look things up. No management access.
@@ -81,6 +104,10 @@ const ROLE_PERMISSIONS = {
     "refund_requests.create",
     "notifications.read",
     "products.read",
+    // Clocks themselves in/out and reviews their own hours. No console access:
+    // /time requires time.view_all.
+    "time.clock",
+    "time.view_own",
   ],
 };
 

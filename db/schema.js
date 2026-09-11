@@ -3,7 +3,7 @@
 // Do not hand-edit table shapes here — re-run pull and re-convert if the DB schema changes.
 // See docs/local-dev.md.
 
-const { pgTable, uniqueIndex, index, unique, bigserial, text, varchar, boolean, jsonb, timestamp, foreignKey, bigint, numeric, integer, pgEnum, uuid } = require("drizzle-orm/pg-core");
+const { pgTable, uniqueIndex, index, unique, bigserial, text, varchar, boolean, jsonb, timestamp, time, foreignKey, bigint, numeric, integer, pgEnum, uuid } = require("drizzle-orm/pg-core");
 const { sql } = require("drizzle-orm");
 const applicableTo = pgEnum("applicable_to", ['ALL_PRODUCTS', 'SPECIFIC_PRODUCTS', 'CATEGORIES'])
 const discountCategory = pgEnum("discount_category", ['PWD', 'SENIOR_CITIZEN', 'PROMOTIONAL', 'SEASONAL', 'OTHER'])
@@ -512,6 +512,169 @@ const branchStocks = pgTable("branch_stocks", {
 	unique("unique_product_branch").on(table.productId, table.branchId),
 ]);
 
+// --- Time tracking -----------------------------------------------------------
+// Ported from `drizzle-kit pull` with the two load-bearing conventions applied
+// (see docs/local-dev.md): bigserial PKs are mode:"number" (mode:"bigint"
+// returns BigInt and JSON.stringify throws on it), and every numeric column is
+// mode:"number" so clients get numbers, not strings.
+
+const branchClockRules = pgTable("branch_clock_rules", {
+	branchId: bigint("branch_id", { mode: "number" }).primaryKey().notNull(),
+	wifiLock: boolean("wifi_lock").default(true).notNull(),
+	geoLock: boolean("geo_lock").default(true).notNull(),
+	geoRadiusM: integer("geo_radius_m").default(150).notNull(),
+	latitude: numeric({ precision: 10, scale: 7, mode: "number" }),
+	longitude: numeric({ precision: 10, scale: 7, mode: "number" }),
+	autoClockOut: boolean("auto_clock_out").default(true).notNull(),
+	autoClockOutAt: time("auto_clock_out_at").default('22:00:00').notNull(),
+	lateGraceMinutes: integer("late_grace_minutes").default(15).notNull(),
+	updatedBy: bigint("updated_by", { mode: "number" }),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	foreignKey({
+			columns: [table.branchId],
+			foreignColumns: [branches.id],
+			name: "branch_clock_rules_branch_id_fkey"
+		}).onUpdate("cascade").onDelete("cascade"),
+	foreignKey({
+			columns: [table.updatedBy],
+			foreignColumns: [users.id],
+			name: "branch_clock_rules_updated_by_fkey"
+		}).onUpdate("cascade").onDelete("set null"),
+]);
+
+const branchAccessPoints = pgTable("branch_access_points", {
+	id: bigserial({ mode: "number" }).primaryKey().notNull(),
+	branchId: bigint("branch_id", { mode: "number" }).notNull(),
+	ssid: text().notNull(),
+	bssid: text().notNull(),
+	label: text(),
+	isAllowed: boolean("is_allowed").default(true).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("idx_access_points_branch").using("btree", table.branchId.asc().nullsLast().op("int8_ops")),
+	foreignKey({
+			columns: [table.branchId],
+			foreignColumns: [branches.id],
+			name: "branch_access_points_branch_id_fkey"
+		}).onUpdate("cascade").onDelete("cascade"),
+]);
+
+const branchPayRules = pgTable("branch_pay_rules", {
+	branchId: bigint("branch_id", { mode: "number" }).primaryKey().notNull(),
+	normalWeekHours: numeric("normal_week_hours", { precision: 5, scale: 2, mode: "number" }).default(45).notNull(),
+	overtimeMultiplier: numeric("overtime_multiplier", { precision: 4, scale: 2, mode: "number" }).default(1.5).notNull(),
+	holidayMultiplier: numeric("holiday_multiplier", { precision: 4, scale: 2, mode: "number" }).default(2.0).notNull(),
+	unpaidBreakMinutes: integer("unpaid_break_minutes").default(30).notNull(),
+	payPeriodDay: integer("pay_period_day").default(25).notNull(),
+	hourlyRate: numeric("hourly_rate", { precision: 10, scale: 2, mode: "number" }),
+	updatedBy: bigint("updated_by", { mode: "number" }),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	foreignKey({
+			columns: [table.branchId],
+			foreignColumns: [branches.id],
+			name: "branch_pay_rules_branch_id_fkey"
+		}).onUpdate("cascade").onDelete("cascade"),
+	foreignKey({
+			columns: [table.updatedBy],
+			foreignColumns: [users.id],
+			name: "branch_pay_rules_updated_by_fkey"
+		}).onUpdate("cascade").onDelete("set null"),
+]);
+
+const shiftSchedules = pgTable("shift_schedules", {
+	id: bigserial({ mode: "number" }).primaryKey().notNull(),
+	userId: bigint("user_id", { mode: "number" }).notNull(),
+	branchId: bigint("branch_id", { mode: "number" }).notNull(),
+	startsAt: timestamp("starts_at", { withTimezone: true, mode: 'string' }).notNull(),
+	endsAt: timestamp("ends_at", { withTimezone: true, mode: 'string' }).notNull(),
+	note: text(),
+	createdBy: bigint("created_by", { mode: "number" }),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("idx_shift_schedules_branch_start").using("btree", table.branchId.asc().nullsLast().op("int8_ops"), table.startsAt.asc().nullsLast().op("timestamptz_ops")),
+	index("idx_shift_schedules_user_start").using("btree", table.userId.asc().nullsLast().op("int8_ops"), table.startsAt.asc().nullsLast().op("timestamptz_ops")),
+	foreignKey({
+			columns: [table.userId],
+			foreignColumns: [users.id],
+			name: "shift_schedules_user_id_fkey"
+		}).onUpdate("cascade").onDelete("cascade"),
+	foreignKey({
+			columns: [table.branchId],
+			foreignColumns: [branches.id],
+			name: "shift_schedules_branch_id_fkey"
+		}).onUpdate("cascade").onDelete("cascade"),
+]);
+
+const coverageRequirements = pgTable("coverage_requirements", {
+	id: bigserial({ mode: "number" }).primaryKey().notNull(),
+	branchId: bigint("branch_id", { mode: "number" }).notNull(),
+	weekday: integer().notNull(),
+	startTime: time("start_time").notNull(),
+	endTime: time("end_time").notNull(),
+	requiredStaff: integer("required_staff").default(1).notNull(),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("idx_coverage_requirements_branch").using("btree", table.branchId.asc().nullsLast().op("int8_ops"), table.weekday.asc().nullsLast().op("int4_ops")),
+	foreignKey({
+			columns: [table.branchId],
+			foreignColumns: [branches.id],
+			name: "coverage_requirements_branch_id_fkey"
+		}).onUpdate("cascade").onDelete("cascade"),
+]);
+
+const timeEntries = pgTable("time_entries", {
+	id: bigserial({ mode: "number" }).primaryKey().notNull(),
+	userId: bigint("user_id", { mode: "number" }).notNull(),
+	branchId: bigint("branch_id", { mode: "number" }).notNull(),
+	clockInAt: timestamp("clock_in_at", { withTimezone: true, mode: 'string' }).notNull(),
+	clockOutAt: timestamp("clock_out_at", { withTimezone: true, mode: 'string' }),
+	breakMinutes: integer("break_minutes").default(0).notNull(),
+	breakStartedAt: timestamp("break_started_at", { withTimezone: true, mode: 'string' }),
+	status: text().default('open').notNull(),
+	source: text().default('mobile').notNull(),
+	verified: boolean().default(false).notNull(),
+	flagReason: text("flag_reason"),
+	evidence: jsonb().default({}).notNull(),
+	autoClosed: boolean("auto_closed").default(false).notNull(),
+	approvedBy: bigint("approved_by", { mode: "number" }),
+	approvedAt: timestamp("approved_at", { withTimezone: true, mode: 'string' }),
+	editedBy: bigint("edited_by", { mode: "number" }),
+	editedAt: timestamp("edited_at", { withTimezone: true, mode: 'string' }),
+	editReason: text("edit_reason"),
+	note: text(),
+	clientRef: text("client_ref"),
+	createdAt: timestamp("created_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+	updatedAt: timestamp("updated_at", { withTimezone: true, mode: 'string' }).defaultNow().notNull(),
+}, (table) => [
+	index("idx_time_entries_branch_in").using("btree", table.branchId.asc().nullsLast().op("int8_ops"), table.clockInAt.desc().nullsFirst().op("timestamptz_ops")),
+	index("idx_time_entries_status_branch").using("btree", table.status.asc().nullsLast().op("text_ops"), table.branchId.asc().nullsLast().op("int8_ops")),
+	index("idx_time_entries_user_in").using("btree", table.userId.asc().nullsLast().op("int8_ops"), table.clockInAt.desc().nullsFirst().op("timestamptz_ops")),
+	uniqueIndex("uniq_time_entries_client_ref").using("btree", table.clientRef.asc().nullsLast().op("text_ops")).where(sql`(client_ref IS NOT NULL)`),
+	uniqueIndex("uniq_time_entry_open_per_user").using("btree", table.userId.asc().nullsLast().op("int8_ops")).where(sql`(clock_out_at IS NULL)`),
+	foreignKey({
+			columns: [table.userId],
+			foreignColumns: [users.id],
+			name: "time_entries_user_id_fkey"
+		}).onUpdate("cascade").onDelete("restrict"),
+	foreignKey({
+			columns: [table.branchId],
+			foreignColumns: [branches.id],
+			name: "time_entries_branch_id_fkey"
+		}).onUpdate("cascade").onDelete("restrict"),
+	foreignKey({
+			columns: [table.approvedBy],
+			foreignColumns: [users.id],
+			name: "time_entries_approved_by_fkey"
+		}).onUpdate("cascade").onDelete("set null"),
+	foreignKey({
+			columns: [table.editedBy],
+			foreignColumns: [users.id],
+			name: "time_entries_edited_by_fkey"
+		}).onUpdate("cascade").onDelete("set null"),
+]);
+
 module.exports = {
   applicableTo,
   discountCategory,
@@ -535,4 +698,10 @@ module.exports = {
   discounts,
   productDiscounts,
   branchStocks,
+  branchClockRules,
+  branchAccessPoints,
+  branchPayRules,
+  shiftSchedules,
+  coverageRequirements,
+  timeEntries,
 };
