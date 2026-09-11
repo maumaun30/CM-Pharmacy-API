@@ -19,6 +19,7 @@ const branchRoutes = require("./routes/branchRoutes");
 const dashboardRoutes = require("./routes/dashboardRoutes");
 const refundRequestRoutes = require("./routes/refundRequestRoutes");
 const notificationRoutes = require("./routes/notificationRoutes");
+const timeRoutes = require("./routes/timeRoutes");
 
 const { initializeSocket } = require("./utils/socket");
 
@@ -80,6 +81,7 @@ app.use("/api/logs", logRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/refund-requests", refundRequestRoutes);
 app.use("/api/notifications", notificationRoutes);
+app.use("/api/time", timeRoutes);
 
 app.get("/", (req, res) => {
   res.json({ message: "Welcome to Pharmacy POS API" });
