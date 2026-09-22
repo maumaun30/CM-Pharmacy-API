@@ -8,7 +8,6 @@ const {
   emitRefundRequestNew,
   emitRefundRequestResolved,
   emitStockUpdate,
-  emitDashboardRefresh,
 } = require("../utils/socket");
 const { notifyUsers, notifyBranchSupervisors } = require("../utils/notifications");
 const { validateRefundItems } = require("./refundController");
@@ -308,7 +307,8 @@ exports.approveRefundRequest = async (req, res) => {
       for (const su of stockUpdates) {
         emitStockUpdate(sale.branch_id, { productId: su.productId, newStock: stockMap[su.productId] ?? null });
       }
-      emitDashboardRefresh(sale.branch_id);
+      // No dashboard-refresh: "refund-request:resolved" (emitted below) plus the
+      // per-product "stock-updated" events above already cover every listener.
 
       await notifyUsers([row.requested_by], {
         type: "refund_approved",

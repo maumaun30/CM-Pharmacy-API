@@ -3,7 +3,7 @@ const { and, eq, desc, inArray, isNotNull, sql } = require("drizzle-orm");
 const { db, schema } = require("../config/db");
 const { createLog } = require("../middleware/logMiddleware");
 const { dbErrorMessage } = require("../utils/dbError");
-const { emitDashboardRefresh, emitStockUpdate } = require("../utils/socket");
+const { emitStockUpdate } = require("../utils/socket");
 const { invalidate } = require("../utils/cache");
 
 const { users, products, branchStocks, sales, saleItems, refunds, refundItems } = schema;
@@ -254,7 +254,8 @@ exports.createRefund = async (req, res) => {
         newStock: stockMap[su.productId] ?? null,
       });
     }
-    emitDashboardRefresh(sale.branch_id);
+    // No dashboard-refresh: the "stock-updated" events above already tell every
+    // client what changed, and the dashboard cache was already busted above.
 
     // ── 11. Response ──────────────────────────────────────────────────────────
     return res.status(201).json({

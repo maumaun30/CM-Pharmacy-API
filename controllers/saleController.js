@@ -6,7 +6,6 @@ const { dbErrorMessage } = require("../utils/dbError");
 const { invalidate } = require("../utils/cache");
 const {
   emitNewSale,
-  emitDashboardRefresh,
   emitStockUpdate,
   emitLowStockAlert,
 } = require("../utils/socket");
@@ -253,8 +252,8 @@ exports.createSale = async (req, res) => {
           username: seller?.username || "unknown",
         },
       });
-
-      emitDashboardRefresh(completeSale.branch_id);
+      // No dashboard-refresh: "new-sale" above carries the totals the dashboard
+      // needs, and the per-item "stock-updated" events below cover the rest.
     }
 
     for (const item of cart) {

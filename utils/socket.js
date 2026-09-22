@@ -115,21 +115,34 @@ const getIO = () => {
 };
 
 /**
+ * Fan one event out to a branch room and the all-branches admin feed.
+ *
+ * The rooms are chained into a SINGLE emit on purpose. Socket.IO unions the
+ * rooms and delivers one copy per socket, so an admin who sits in both
+ * `branch-N` and `admin-all` receives the event once. Two separate
+ * `.emit()` calls would deliver it twice — and because every client turns an
+ * event into an HTTP refetch, a duplicate frame costs a duplicate round trip,
+ * not just a few bytes.
+ *
+ * @param {string} event    - Event name
+ * @param {number|null} branchId - Branch room to include (null = admins only)
+ * @param {object} [payload]
+ */
+const emitToBranchAndAdmins = (event, branchId, payload) => {
+  const io = getIO();
+  const target = branchId
+    ? io.to(`branch-${branchId}`).to("admin-all")
+    : io.to("admin-all");
+  if (payload === undefined) target.emit(event);
+  else target.emit(event, payload);
+};
+
+/**
  * Emit new sale event
  */
 const emitNewSale = (saleData) => {
   try {
-    const io = getIO();
-    
-    // ✅ FIXED: Use "new-sale" to match frontend listener
-    if (saleData.branchId) {
-      io.to(`branch-${saleData.branchId}`).emit("new-sale", saleData);
-      console.log(`🛒 Emitted new-sale to branch-${saleData.branchId}:`, saleData.id);
-    }
-    
-    // Emit to admin viewing all branches
-    io.to("admin-all").emit("new-sale", saleData);
-    
+    emitToBranchAndAdmins("new-sale", saleData.branchId ?? null, saleData);
   } catch (error) {
     console.error("Error emitting sale event:", error);
   }
@@ -142,22 +155,13 @@ const emitNewSale = (saleData) => {
  */
 const emitStockUpdate = (branchId, data) => {
   try {
-    const io = getIO();
-    
-    // ✅ FIXED: Use "stock-updated" to match frontend listener
-    const payload = {
+    // The payload carries the new value, so a listener never needs to refetch
+    // to learn the current stock — it can patch its copy in place.
+    emitToBranchAndAdmins("stock-updated", branchId, {
       productId: data.productId,
       newStock: data.newStock,
       branchId: branchId,
-    };
-    
-    // Emit to specific branch
-    io.to(`branch-${branchId}`).emit("stock-updated", payload);
-    console.log(`📦 Emitted stock-updated to branch-${branchId}:`, payload);
-    
-    // Emit to admin viewing all branches
-    io.to("admin-all").emit("stock-updated", payload);
-    
+    });
   } catch (error) {
     console.error("Error emitting stock event:", error);
   }
@@ -170,25 +174,25 @@ const emitStockUpdate = (branchId, data) => {
  */
 const emitLowStockAlert = (branchId, productData) => {
   try {
-    const io = getIO();
-    
-    // Emit to specific branch
-    if (branchId) {
-      io.to(`branch-${branchId}`).emit("low-stock-alert", productData);
-      console.log(`⚠️ Emitted low-stock-alert to branch-${branchId}:`, productData.id);
-    }
-    
-    // Emit to admin viewing all branches
-    io.to("admin-all").emit("low-stock-alert", productData);
-    
+    emitToBranchAndAdmins("low-stock-alert", branchId ?? null, productData);
   } catch (error) {
     console.error("Error emitting low stock alert:", error);
   }
 };
 
 /**
- * Emit dashboard refresh request
- * @param {number} branchId - Branch ID to refresh (optional)
+ * Emit dashboard refresh request — a bare "go refetch" with no payload.
+ *
+ * LAST RESORT. Every listener answers it with an HTTP round trip, so the cost
+ * is (connected clients x heavy endpoint), and it says nothing about WHAT
+ * changed. Prefer an event that carries its own data ("new-sale",
+ * "stock-updated", "refund-request:resolved") — those let a client patch in
+ * place. Sale, stock and refund paths deliberately no longer emit this.
+ *
+ * Passing no branchId broadcasts to EVERY connected socket across ALL
+ * branches. Only do that for something genuinely global.
+ *
+ * @param {number} [branchId] - Branch room to refresh; omit to broadcast to all
  */
 const emitDashboardRefresh = (branchId = null) => {
   try {
@@ -214,12 +218,7 @@ const emitDashboardRefresh = (branchId = null) => {
  */
 const emitRefundRequestNew = (branchId, payload) => {
   try {
-    const io = getIO();
-    if (branchId) {
-      io.to(`branch-${branchId}`).emit("refund-request:new", payload);
-      console.log(`🧾 Emitted refund-request:new to branch-${branchId}:`, payload.id);
-    }
-    io.to("admin-all").emit("refund-request:new", payload);
+    emitToBranchAndAdmins("refund-request:new", branchId ?? null, payload);
   } catch (error) {
     console.error("Error emitting refund-request:new:", error);
   }
@@ -232,12 +231,7 @@ const emitRefundRequestNew = (branchId, payload) => {
  */
 const emitRefundRequestResolved = (branchId, payload) => {
   try {
-    const io = getIO();
-    if (branchId) {
-      io.to(`branch-${branchId}`).emit("refund-request:resolved", payload);
-      console.log(`🧾 Emitted refund-request:resolved to branch-${branchId}:`, payload.id, payload.status);
-    }
-    io.to("admin-all").emit("refund-request:resolved", payload);
+    emitToBranchAndAdmins("refund-request:resolved", branchId ?? null, payload);
   } catch (error) {
     console.error("Error emitting refund-request:resolved:", error);
   }
@@ -265,11 +259,7 @@ const emitNotificationNew = (userId, notification) => {
  */
 const emitTimeClock = (branchId, payload) => {
   try {
-    const io = getIO();
-    if (branchId) {
-      io.to(`branch-${branchId}`).emit("time:clock", payload);
-    }
-    io.to("admin-all").emit("time:clock", payload);
+    emitToBranchAndAdmins("time:clock", branchId ?? null, payload);
   } catch (error) {
     console.error("Error emitting time:clock:", error);
   }
@@ -282,11 +272,7 @@ const emitTimeClock = (branchId, payload) => {
  */
 const emitTimeEntryUpdated = (branchId, payload) => {
   try {
-    const io = getIO();
-    if (branchId) {
-      io.to(`branch-${branchId}`).emit("time:entry-updated", payload);
-    }
-    io.to("admin-all").emit("time:entry-updated", payload);
+    emitToBranchAndAdmins("time:entry-updated", branchId ?? null, payload);
   } catch (error) {
     console.error("Error emitting time:entry-updated:", error);
   }

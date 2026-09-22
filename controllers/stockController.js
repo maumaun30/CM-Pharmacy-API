@@ -2,7 +2,7 @@ const { and, eq, gte, lte, desc, asc, count } = require("drizzle-orm");
 const { db, schema } = require("../config/db");
 const { stockFull } = require("../db/projections");
 const { createLog } = require("../middleware/logMiddleware");
-const { emitStockUpdate, emitLowStockAlert, emitDashboardRefresh } = require("../utils/socket");
+const { emitStockUpdate, emitLowStockAlert } = require("../utils/socket");
 const { notifyLowStock } = require("../utils/notifications");
 const { invalidate } = require("../utils/cache");
 
@@ -238,9 +238,11 @@ exports.addStock = async (req, res) => {
     }
 
     invalidate("dashboard:");
+    // No dashboard-refresh here: the "stock-updated" event below already carries
+    // the new quantity, so every client can patch in place. Emitting both made
+    // each adjustment cost two round trips per connected client.
     emitStockUpdate(activeBranchId, { productId, newStock: quantityAfter });
     maybeEmitLowStock(activeBranchId, branchStock, stock.product, quantityAfter);
-    emitDashboardRefresh(activeBranchId);
 
     return res.status(201).json(stock);
   } catch (error) {
@@ -316,9 +318,11 @@ exports.adjustStock = async (req, res) => {
     }
 
     invalidate("dashboard:");
+    // No dashboard-refresh here: the "stock-updated" event below already carries
+    // the new quantity, so every client can patch in place. Emitting both made
+    // each adjustment cost two round trips per connected client.
     emitStockUpdate(activeBranchId, { productId, newStock: quantityAfter });
     maybeEmitLowStock(activeBranchId, branchStock, stock.product, quantityAfter);
-    emitDashboardRefresh(activeBranchId);
 
     return res.status(201).json(stock);
   } catch (error) {
@@ -376,9 +380,11 @@ exports.recordStockLoss = async (req, res) => {
     );
 
     invalidate("dashboard:");
+    // No dashboard-refresh here: the "stock-updated" event below already carries
+    // the new quantity, so every client can patch in place. Emitting both made
+    // each adjustment cost two round trips per connected client.
     emitStockUpdate(activeBranchId, { productId, newStock: quantityAfter });
     maybeEmitLowStock(activeBranchId, branchStock, stock.product, quantityAfter);
-    emitDashboardRefresh(activeBranchId);
 
     return res.status(201).json(stock);
   } catch (error) {
