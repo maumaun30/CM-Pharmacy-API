@@ -68,6 +68,22 @@ const productFull = {
   updated_at: p.updatedAt,
 };
 
+// Slim product row for the POS catalog (`GET /products?fields=pos`). Exactly
+// the fields the web and mobile POS read — drops the long text columns
+// (description, generic/brand name, dosage, form) and timestamps, which make up
+// most of the payload. Add a field here only if a POS screen starts reading it.
+const productPos = {
+  id: p.id,
+  name: p.name,
+  sku: p.sku,
+  barcode: p.barcode,
+  price: p.price,
+  cost: p.cost,
+  status: p.status,
+  track_inventory: p.trackInventory,
+  category_id: p.categoryId,
+};
+
 // Full branch_stocks row (matches `branch_stocks.select("*")`).
 const branchStockFull = {
   id: bs.id,
@@ -79,6 +95,16 @@ const branchStockFull = {
   reorder_point: bs.reorderPoint,
   created_at: bs.createdAt,
   updated_at: bs.updatedAt,
+};
+
+// Slim branch_stocks row for the POS catalog: quantity + the two thresholds
+// the stock badges classify against.
+const branchStockPos = {
+  product_id: bs.productId,
+  branch_id: bs.branchId,
+  current_stock: bs.currentStock,
+  minimum_stock: bs.minimumStock,
+  reorder_point: bs.reorderPoint,
 };
 
 const st = schema.stocks;
@@ -126,4 +152,13 @@ const stockFull = {
   created_at: st.createdAt,
 };
 
-module.exports = { branchFull, userProfile, productFull, branchStockFull, stockFull, discountFull };
+module.exports = {
+  branchFull,
+  userProfile,
+  productFull,
+  productPos,
+  branchStockFull,
+  branchStockPos,
+  stockFull,
+  discountFull,
+};

@@ -1,6 +1,6 @@
 const { and, or, eq, ilike, gte, lte, desc, asc, inArray } = require("drizzle-orm");
 const { db, schema } = require("../config/db");
-const { productFull, branchStockFull } = require("../db/projections");
+const { productFull, productPos, branchStockFull, branchStockPos } = require("../db/projections");
 const { createLog } = require("../middleware/logMiddleware");
 
 const { products, categories, branchStocks, branches } = schema;
@@ -10,19 +10,32 @@ const branchMini = { id: branches.id, name: branches.name, code: branches.code }
 
 // Attach `branch_stocks[]` (each with nested `branch`) to product rows,
 // reproducing the supabase PRODUCT_WITH_STOCKS nested shape.
-async function attachStocks(productRows) {
+//
+// opts.branchId  — only that branch's rows. Filtered in SQL: the old path read
+//                  every branch's rows and dropped the rest in JS.
+// opts.slim      — POS view: branchStockPos columns, no branch join.
+// opts.allProducts — productRows is the entire table, so skip the
+//                  `product_id IN (...)` list (one bind param per product).
+async function attachStocks(productRows, opts = {}) {
+  const { branchId = null, slim = false, allProducts = false } = opts;
   if (productRows.length === 0) return productRows;
-  const ids = productRows.map((p) => p.id);
 
-  const stockRows = await db
-    .select({ ...branchStockFull, branch: branchMini })
-    .from(branchStocks)
-    .leftJoin(branches, eq(branchStocks.branchId, branches.id))
-    .where(inArray(branchStocks.productId, ids));
+  const conds = [];
+  if (!allProducts) conds.push(inArray(branchStocks.productId, productRows.map((p) => p.id)));
+  if (branchId != null) conds.push(eq(branchStocks.branchId, branchId));
+  const where = conds.length ? and(...conds) : undefined;
+
+  const stockRows = slim
+    ? await db.select(branchStockPos).from(branchStocks).where(where)
+    : await db
+        .select({ ...branchStockFull, branch: branchMini })
+        .from(branchStocks)
+        .leftJoin(branches, eq(branchStocks.branchId, branches.id))
+        .where(where);
 
   const byProduct = new Map();
   for (const s of stockRows) {
-    s.branch = s.branch?.id ? s.branch : null;
+    if (!slim) s.branch = s.branch?.id ? s.branch : null;
     if (!byProduct.has(s.product_id)) byProduct.set(s.product_id, []);
     byProduct.get(s.product_id).push(s);
   }
@@ -56,7 +69,22 @@ exports.getAllProducts = async (req, res) => {
       inStock,
       status,
       branchId,
+      fields,
     } = req.query;
+
+    // `fields=pos` returns the slim catalog both POS apps use. Same shape,
+    // fewer columns, no category/branch joins. Anything else = full rows.
+    const slim = fields === "pos";
+
+    // Validate up front: branchId now goes into SQL, where a non-integer would
+    // be a query error rather than the empty filter it used to produce in JS.
+    let branchIdNum = null;
+    if (branchId !== undefined && branchId !== "") {
+      branchIdNum = Number(branchId);
+      if (!Number.isInteger(branchIdNum)) {
+        return res.status(400).json({ message: "branchId must be an integer" });
+      }
+    }
 
     const conds = [];
     if (categoryId) conds.push(eq(products.categoryId, categoryId));
@@ -75,28 +103,32 @@ exports.getAllProducts = async (req, res) => {
         )
       );
 
-    const productRows = await db
-      .select({ ...productFull, category: categoryMini })
-      .from(products)
-      .leftJoin(categories, eq(products.categoryId, categories.id))
-      .where(conds.length ? and(...conds) : undefined)
-      .orderBy(desc(products.createdAt));
+    const where = conds.length ? and(...conds) : undefined;
+    const productRows = slim
+      ? await db.select(productPos).from(products).where(where).orderBy(desc(products.createdAt))
+      : await db
+          .select({ ...productFull, category: categoryMini })
+          .from(products)
+          .leftJoin(categories, eq(products.categoryId, categories.id))
+          .where(where)
+          .orderBy(desc(products.createdAt));
 
-    const withStocks = await attachStocks(productRows);
+    const withStocks = await attachStocks(productRows, {
+      branchId: branchIdNum,
+      slim,
+      allProducts: conds.length === 0,
+    });
 
-    // Post-process: branchId filter, totalStock, inStock (matches prior JS).
+    // Post-process: totalStock + currentStock. branch_stocks is already
+    // scoped to branchId by the query above.
     let result = withStocks.map((p) => {
-      const stocks = branchId
-        ? p.branch_stocks.filter((bs) => String(bs.branch_id) === String(branchId))
-        : p.branch_stocks;
-
+      const stocks = p.branch_stocks;
       const totalStock = stocks.reduce((sum, bs) => sum + (bs.current_stock || 0), 0);
 
       return {
         ...p,
-        branch_stocks: stocks,
         totalStock,
-        ...(branchId && stocks[0] ? { currentStock: stocks[0].current_stock } : {}),
+        ...(branchIdNum != null && stocks[0] ? { currentStock: stocks[0].current_stock } : {}),
       };
     });
 
