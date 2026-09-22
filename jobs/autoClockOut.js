@@ -2,7 +2,7 @@ const { and, eq, isNull } = require("drizzle-orm");
 const dayjs = require("dayjs");
 const { db, schema } = require("../config/db");
 const { createLog } = require("../middleware/logMiddleware");
-const { emitTimeClock, emitDashboardRefresh } = require("../utils/socket");
+const { emitTimeClock } = require("../utils/socket");
 
 const { timeEntries, branchClockRules } = schema;
 
@@ -103,8 +103,12 @@ async function runAutoClockOut({ now = dayjs() } = {}) {
     });
   }
 
+  // No dashboard-refresh here. It used to be emitted with no branchId, which
+  // broadcasts to every connected socket on every branch -- and every dashboard
+  // answered it by refetching sales/stock stats that a closed shift never
+  // changes (no dashboard endpoint reads time_entries). The per-entry
+  // "time:clock" above is what the time console listens to.
   if (closed.length > 0) {
-    emitDashboardRefresh();
     console.log(`[autoClockOut] closed ${closed.length} forgotten shift(s)`);
   }
 
