@@ -60,6 +60,14 @@ services:
     depends_on:
       - api
 
+    # Access logging is on (see Caddyfile); cap the json-file driver so the
+    # log can never fill the droplet disk.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   cm_pharmacy_pgdata:
   caddy_data:

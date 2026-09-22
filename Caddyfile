@@ -8,6 +8,14 @@
 # Both hostnames route to the same API container. cm-api.devmau.site is kept
 # during the maunpharmacy.com migration; remove it once all clients cut over.
 cm-api.devmau.site, api.maunpharmacy.com {
+	# Per-request access log (JSON) to stdout, so `docker logs cm-pharmacy-caddy`
+	# can be aggregated by path to see which endpoints drive droplet load.
+	# Docker json-file rotation is capped in docker-compose.prod.yml.
+	log {
+		output stdout
+		format json
+	}
+
 	# Compress at the edge instead of in Express. zstd is preferred when the
 	# client advertises it (better ratio than gzip on JSON), gzip is the
 	# fallback. Caddy skips already-encoded responses and WebSocket frames.
