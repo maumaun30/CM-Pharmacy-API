@@ -444,6 +444,117 @@ exports.getSalesByCategory = async (req, res) => {
   }
 };
 
+// ─── Get Sales Summary (period-aware P&L strip) ───────────────────────────────
+//
+// Powers the admin app's "Sales summary" detail screen. Same period params as
+// /sales-trend so the two screens describe the same window.
+//
+//   gross_sales   = Σ (total_amount + total_discount)   — before discounts/refunds
+//   discounts     = Σ total_discount
+//   refunds       = Σ refunds.total_refund              — by REFUND date, not sale date
+//   net_sales     = gross - discounts - refunds         (≡ Σ total_amount - refunds)
+//   cost_of_goods = Σ (sold qty × products.cost) - Σ (refunded qty × products.cost)
+//   gross_profit  = net_sales - cost_of_goods
+//
+// Net sales is derived upward from total_amount rather than from sale_items so
+// it stays identical to the figure /sales-trend already plots — the two screens
+// must never disagree by rounding.
+//
+// Caveat: products.cost is the CURRENT cost, not a snapshot taken at sale time
+// (the schema stores no per-line cost). Restating a product's cost therefore
+// moves historical gross profit. Accepted deliberately; revisit by adding
+// sale_items.cost + writing it in create_sale if that becomes a problem.
+
+exports.getSalesSummary = async (req, res) => {
+  try {
+    const activeBranchId = getActiveBranchId(req.user);
+    const mode   = req.query.mode   || "daily";
+    const offset = parseInt(req.query.offset ?? "0", 10);
+    const { start, end } = req.query;
+
+    if (mode === "custom" && !(dayjs(start).isValid() && dayjs(end).isValid())) {
+      return res.status(400).json({ message: "mode=custom requires valid start and end dates" });
+    }
+
+    const cacheKey = `dashboard:summary:${activeBranchId ?? "all"}:${mode}:${offset}:${start ?? ""}:${end ?? ""}`;
+
+    const result = await getCached(cacheKey, TTL_MEDIUM, async () => {
+      const { rangeStart, rangeEnd } = resolveRange(mode, offset, start, end);
+      const from = rangeStart.toISOString();
+      const to   = rangeEnd.toISOString();
+
+      const salesBranch  = activeBranchId ? sql`and s.branch_id = ${activeBranchId}` : sql``;
+      const refundBranch = activeBranchId ? sql`and r.branch_id = ${activeBranchId}` : sql``;
+
+      const { rows } = await db.execute(sql`
+        with sold as (
+          select
+            coalesce(sum(s.total_amount), 0)   as net_charged,
+            coalesce(sum(s.total_discount), 0) as discounts,
+            count(*)                           as receipts
+          from sales s
+          where s.sold_at >= ${from} and s.sold_at <= ${to} ${salesBranch}
+        ),
+        sold_cost as (
+          select coalesce(sum(si.quantity * p.cost), 0) as cost
+          from sale_items si
+          join sales s    on s.id = si.sale_id
+          join products p on p.id = si.product_id
+          where s.sold_at >= ${from} and s.sold_at <= ${to} ${salesBranch}
+        ),
+        refunded as (
+          select coalesce(sum(r.total_refund), 0) as amount
+          from refunds r
+          where r.created_at >= ${from} and r.created_at <= ${to} ${refundBranch}
+        ),
+        refunded_cost as (
+          select coalesce(sum(ri.quantity * p.cost), 0) as cost
+          from refund_items ri
+          join refunds r  on r.id = ri.refund_id
+          join products p on p.id = ri.product_id
+          where r.created_at >= ${from} and r.created_at <= ${to} ${refundBranch}
+        )
+        select
+          sold.net_charged, sold.discounts, sold.receipts,
+          refunded.amount            as refunds,
+          sold_cost.cost             as sold_cost,
+          refunded_cost.cost         as refunded_cost
+        from sold, sold_cost, refunded, refunded_cost
+      `);
+
+      const r = rows[0] ?? {};
+      const netCharged   = parseFloat(r.net_charged)    || 0;
+      const discounts    = parseFloat(r.discounts)      || 0;
+      const refundTotal  = parseFloat(r.refunds)        || 0;
+      const costOfGoods  = (parseFloat(r.sold_cost) || 0) - (parseFloat(r.refunded_cost) || 0);
+
+      const grossSales = netCharged + discounts;
+      const netSales   = netCharged - refundTotal;
+
+      // Subtracting float sums leaves artefacts (…4299999999994); these are
+      // peso amounts, so settle them at two decimals before they leave.
+      const money = (n) => Math.round(n * 100) / 100;
+
+      return {
+        gross_sales:   money(grossSales),
+        refunds:       money(refundTotal),
+        discounts:     money(discounts),
+        net_sales:     money(netSales),
+        cost_of_goods: money(costOfGoods),
+        gross_profit:  money(netSales - costOfGoods),
+        receipts:      parseInt(r.receipts, 10) || 0,
+        range_start:   rangeStart.toISOString(),
+        range_end:     rangeEnd.toISOString(),
+      };
+    });
+
+    return res.json(result);
+  } catch (error) {
+    console.error("Sales summary error:", error);
+    return res.status(500).json({ message: "Error fetching sales summary", error: error.message });
+  }
+};
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function selectSalesInRange(activeBranchId, rangeStart, rangeEnd) {

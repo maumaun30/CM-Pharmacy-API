@@ -12,5 +12,6 @@ router.get("/top-products", dashboardController.getTopProducts);
 router.get("/analytics-top-products", dashboardController.getAnalyticsTopProducts);
 router.get("/sales-trend", dashboardController.getSalesTrend);
 router.get("/sales-by-category", dashboardController.getSalesByCategory);
+router.get("/sales-summary", dashboardController.getSalesSummary);
 
 module.exports = router;
