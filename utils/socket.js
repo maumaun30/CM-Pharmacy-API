@@ -1,7 +1,7 @@
 const socketIO = require("socket.io");
 const jwt = require("jsonwebtoken");
 const { eq } = require("drizzle-orm");
-const { corsOrigin } = require("../config/cors");
+const { socketCorsOrigin } = require("../config/cors");
 const { db, schema } = require("../config/db");
 
 const { users } = schema;
@@ -14,7 +14,8 @@ let io;
 const initializeSocket = (server) => {
   io = socketIO(server, {
     cors: {
-      origin: corsOrigin,
+      // Not the HTTP API's allow-list — see config/cors.js for why.
+      origin: socketCorsOrigin,
       methods: ["GET", "POST"],
       credentials: true,
     },
