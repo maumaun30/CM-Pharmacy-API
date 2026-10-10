@@ -29,6 +29,36 @@ const { users, products, branchStocks, sales, saleItems, branches, discounts } =
 // Keep db/functions/create_sale.sql in sync with any changes to sale/stock logic.
 // ─────────────────────────────────────────────────────────────────────────────
 
+async function findSaleByClientRef(clientRef) {
+  const [existing] = await db
+    .select({
+      id: sales.id,
+      subtotal: sales.subtotal,
+      total_discount: sales.totalDiscount,
+      total_amount: sales.totalAmount,
+      cash_amount: sales.cashAmount,
+      change_amount: sales.changeAmount,
+    })
+    .from(sales)
+    .where(eq(sales.clientRef, clientRef))
+    .limit(1);
+  return existing ?? null;
+}
+
+// Same shape as a fresh sale's 201, built from the stored row.
+function replayedSaleResponse(res, existing) {
+  return res.status(200).json({
+    message: "Sale already recorded",
+    saleId: existing.id,
+    subtotal: existing.subtotal,
+    totalDiscount: existing.total_discount,
+    totalAmount: existing.total_amount,
+    cashAmount: existing.cash_amount,
+    changeAmount: existing.change_amount,
+    replayed: true,
+  });
+}
+
 exports.createSale = async (req, res) => {
   try {
     const {
@@ -48,6 +78,17 @@ exports.createSale = async (req, res) => {
     const activeBranchId = user.current_branch_id || user.branch_id;
     if (!activeBranchId) {
       return res.status(400).json({ message: "User is not assigned to any branch" });
+    }
+
+    // ── 1b. Idempotent replay ─────────────────────────────────────────────────
+    // A clientRef already on file means this sale was recorded before (offline
+    // outbox replay, or a POS retry after a lost response). Answer with the
+    // stored sale and skip validation, logging and socket emits: re-validating
+    // could reject it on a since-changed price, and re-emitting would show the
+    // sale twice in logs and live feeds.
+    if (clientRef) {
+      const existing = await findSaleByClientRef(clientRef);
+      if (existing) return replayedSaleResponse(res, existing);
     }
 
     // ── 2. Input validation ──────────────────────────────────────────────────
@@ -186,13 +227,10 @@ exports.createSale = async (req, res) => {
         clientRef && pgErr.code === "23505" &&
         String(pgErr.constraint || "").includes("client_ref");
       if (!isClientRefConflict) throw rpcError;
-      const [existing] = await db
-        .select({ id: sales.id })
-        .from(sales)
-        .where(eq(sales.clientRef, clientRef))
-        .limit(1);
+      const existing = await findSaleByClientRef(clientRef);
       if (!existing) throw rpcError;
-      saleId = existing.id;
+      // The winning request already logged and emitted this sale.
+      return replayedSaleResponse(res, existing);
     }
 
     // ── 7. Audit log ──────────────────────────────────────────────────────────
